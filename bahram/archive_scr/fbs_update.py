@@ -19,7 +19,7 @@ start_date=dates[0]
 dates=[datetime.datetime.timestamp(date) for date in dates]
 
 
-gc = gspread.service_account(filename='/home/baakhofficial/wbauto/bahram/cred.json')
+#gc = gspread.service_account(filename='/home/baakhofficial/wbauto/bahram/cred.json')
 worksheet = gc.open_by_key("15thyGyoR3qUud50Z1L7nwaN6aNob6rqwF4qA4w1UfnQ").sheet1
 df_investors = pd.DataFrame(worksheet.get_all_records())
 df_investors = df_investors[(df_investors['API стандартный'] != '')&(df_investors['API стандартный'] != None)]

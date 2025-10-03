@@ -336,7 +336,6 @@ def create_upd_table_if_not_exists():
     
     create_table_query = f"""
     CREATE TABLE IF NOT EXISTS {PG_SCHEMA}.{PG_TABLE} (
-        id SERIAL PRIMARY KEY,
         company VARCHAR(255) NOT NULL,
         upd_number VARCHAR(100),
         date VARCHAR(20),
@@ -344,7 +343,7 @@ def create_upd_table_if_not_exists():
         cost NUMERIC(15, 2),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (company, upd_number, item_name)
+        UNIQUE (company, upd_number, date, item_name, cost)
     );
     
     CREATE INDEX IF NOT EXISTS idx_upd_company ON {PG_SCHEMA}.{PG_TABLE}(company);
@@ -356,7 +355,7 @@ def create_upd_table_if_not_exists():
         with engine.begin() as conn:
             conn.execute(text(create_schema_query))
             conn.execute(text(create_table_query))
-        print("✓ Таблица БД создана/проверена (уникальный ключ: company + upd_number + item_name)")
+        print("✓ Таблица БД создана/проверена (уникальный ключ: company + upd_number + date + item_name + cost)")
         return True
     except Exception as e:
         print(f"✗ Ошибка создания таблицы: {e}")
@@ -401,7 +400,7 @@ def add_missing_columns(data_columns):
     
     for col_name, col_type in data_columns.items():
         # Пропускаем системные колонки
-        if col_name in ['id', 'created_at', 'updated_at']:
+        if col_name in ['created_at', 'updated_at']:
             continue
             
         # Если колонка уже есть, пропускаем
@@ -447,12 +446,12 @@ def upload_upd_to_postgres(upd_data):
         data_columns = dict(df.dtypes)
         add_missing_columns(data_columns)
         
-        # Получаем список колонок для INSERT (исключаем id и created_at)
-        columns_to_insert = [col for col in df.columns if col not in ['id', 'created_at']]
+        # Получаем список колонок для INSERT (исключаем created_at)
+        columns_to_insert = [col for col in df.columns if col not in ['created_at']]
         
-        # Получаем список колонок для UPDATE (исключаем id, created_at и ключевые поля)
+        # Получаем список колонок для UPDATE (исключаем created_at и ключевые поля)
         columns_to_update = [col for col in columns_to_insert 
-                            if col not in ['company', 'upd_number', 'item_name']]
+                            if col not in ['company', 'upd_number', 'date', 'item_name', 'cost']]
         
         # Конвертируем DataFrame в список словарей
         records = df[columns_to_insert].to_dict('records')
@@ -466,7 +465,7 @@ def upload_upd_to_postgres(upd_data):
         upsert_query = f"""
         INSERT INTO {PG_SCHEMA}.{PG_TABLE} ({columns_str})
         VALUES ({placeholders})
-        ON CONFLICT (company, upd_number, item_name)
+        ON CONFLICT (company, upd_number, date, item_name, cost)
         DO UPDATE SET {update_str};
         """
         
@@ -481,8 +480,6 @@ def upload_upd_to_postgres(upd_data):
                 
                 for record in batch:
                     result = conn.execute(text(upsert_query), record)
-                    # В PostgreSQL нельзя точно узнать был ли INSERT или UPDATE
-                    # но мы можем предположить на основе rowcount
                     inserted_count += 1
         
         print(f"  ✓ {len(records)} позиций обработано в PostgreSQL (UPSERT)")
@@ -491,6 +488,35 @@ def upload_upd_to_postgres(upd_data):
     except Exception as e:
         print(f"  ✗ Ошибка загрузки в БД: {e}")
         print(f"  Детали: {traceback.format_exc()}")
+        return False
+
+def deduplicate_upd_data():
+    """Выполняет дедупликацию данных в таблице УПД по всем ключевым полям"""
+    try:
+        deduplicate_query = f"""
+        DELETE FROM {PG_SCHEMA}.{PG_TABLE} a
+        USING {PG_SCHEMA}.{PG_TABLE} b
+        WHERE a.ctid < b.ctid
+        AND a.company = b.company
+        AND a.upd_number = b.upd_number
+        AND a.date = b.date
+        AND a.item_name = b.item_name
+        AND a.cost = b.cost;
+        """
+        
+        with engine.begin() as conn:
+            result = conn.execute(text(deduplicate_query))
+            deleted_rows = result.rowcount
+        
+        if deleted_rows > 0:
+            print(f"  ✓ Удалено {deleted_rows} дубликатов из таблицы")
+        else:
+            print(f"  ✓ Дубликаты не найдены")
+        
+        return True
+        
+    except Exception as e:
+        print(f"  ✗ Ошибка при дедупликации: {e}")
         return False
 
 def cleanup_files(directory, archive_path=None):
@@ -539,7 +565,7 @@ df = get_sheet_data_as_dataframe(credentials_file, spreadsheet_key, sheet_name)
 df = df[(df['API ключ'] != '') & (df['API ключ'] != None) & ~((df['Имя Юрлица'] == 'TD') | (df['Имя Юрлица'] == 'ИП Крапивина С.А.'))]
 
 # Для теста можно раскомментировать (тестируем на одной компании):
-df = df[df['Имя Юрлица']=='ИП Баах И.Л.']
+#df = df[df['Имя Юрлица']=='ИП Баах И.Л.']
 
 dict_api = dict(zip(df['API ключ'], df['Имя Юрлица']))
 print(f"Найдено {len(dict_api)} компаний для обработки\n")
@@ -634,6 +660,10 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
         
         if upload_success:
             total_stats['total_upd_items'] += len(company_upd_data)
+            
+            # Выполняем дедупликацию после загрузки
+            print(f"\n🔄 Дедупликация данных...")
+            deduplicate_upd_data()
     else:
         print(f"  ⚠ УПД данные не извлечены")
     
