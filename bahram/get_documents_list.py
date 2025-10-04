@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 import psycopg2
 
 # Даты: последние 31 день (формат YYYY-MM-DD)
-date_from = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+date_from = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
 date_to = datetime.now().strftime('%Y-%m-%d')
 
 credentials_file = r"cred.json"
@@ -343,7 +343,7 @@ def create_upd_table_if_not_exists():
         cost NUMERIC(15, 2),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (company, upd_number, date, item_name, cost)
+        CONSTRAINT unique_upd_item UNIQUE (company, upd_number, date, cost)
     );
     
     CREATE INDEX IF NOT EXISTS idx_upd_company ON {PG_SCHEMA}.{PG_TABLE}(company);
@@ -351,11 +351,34 @@ def create_upd_table_if_not_exists():
     CREATE INDEX IF NOT EXISTS idx_upd_date ON {PG_SCHEMA}.{PG_TABLE}(date);
     """
     
+    # Проверяем существование constraint
+    check_constraint_query = f"""
+    SELECT COUNT(*) 
+    FROM information_schema.table_constraints 
+    WHERE table_schema = '{PG_SCHEMA}' 
+    AND table_name = '{PG_TABLE}' 
+    AND constraint_name = 'unique_upd_item';
+    """
+    
     try:
         with engine.begin() as conn:
             conn.execute(text(create_schema_query))
             conn.execute(text(create_table_query))
-        print("✓ Таблица БД создана/проверена (уникальный ключ: company + upd_number + date + item_name + cost)")
+            
+            # Проверяем, есть ли constraint
+            result = conn.execute(text(check_constraint_query))
+            constraint_exists = result.scalar() > 0
+            
+            if not constraint_exists:
+                print("⚠ Добавляем отсутствующий UNIQUE constraint...")
+                add_constraint_query = f"""
+                ALTER TABLE {PG_SCHEMA}.{PG_TABLE} 
+                ADD CONSTRAINT unique_upd_item UNIQUE (company, upd_number, date, cost);
+                """
+                conn.execute(text(add_constraint_query))
+                print("✓ UNIQUE constraint добавлен")
+            
+        print("✓ Таблица БД создана/проверена (уникальный ключ: company + upd_number + date + cost)")
         return True
     except Exception as e:
         print(f"✗ Ошибка создания таблицы: {e}")
@@ -432,7 +455,7 @@ def add_missing_columns(data_columns):
     return len(added_columns) > 0
 
 def upload_upd_to_postgres(upd_data):
-    """Загружает данные УПД в PostgreSQL с UPSERT логикой"""
+    """Загружает данные УПД в PostgreSQL с UPSERT логикой через временную таблицу"""
     if not upd_data:
         return False
     
@@ -451,7 +474,7 @@ def upload_upd_to_postgres(upd_data):
         
         # Получаем список колонок для UPDATE (исключаем created_at и ключевые поля)
         columns_to_update = [col for col in columns_to_insert 
-                            if col not in ['company', 'upd_number', 'date', 'item_name', 'cost']]
+                            if col not in ['company', 'upd_number', 'date', 'cost']]
         
         # Конвертируем DataFrame в список словарей
         records = df[columns_to_insert].to_dict('records')
@@ -465,7 +488,7 @@ def upload_upd_to_postgres(upd_data):
         upsert_query = f"""
         INSERT INTO {PG_SCHEMA}.{PG_TABLE} ({columns_str})
         VALUES ({placeholders})
-        ON CONFLICT (company, upd_number, date, item_name, cost)
+        ON CONFLICT (company, upd_number, date, cost)
         DO UPDATE SET {update_str};
         """
         
@@ -491,22 +514,57 @@ def upload_upd_to_postgres(upd_data):
         return False
 
 def deduplicate_upd_data():
-    """Выполняет дедупликацию данных в таблице УПД по всем ключевым полям"""
+    """Выполняет дедупликацию данных в таблице УПД через временную таблицу"""
     try:
-        deduplicate_query = f"""
-        DELETE FROM {PG_SCHEMA}.{PG_TABLE} a
-        USING {PG_SCHEMA}.{PG_TABLE} b
-        WHERE a.ctid < b.ctid
-        AND a.company = b.company
-        AND a.upd_number = b.upd_number
-        AND a.date = b.date
-        AND a.item_name = b.item_name
-        AND a.cost = b.cost;
+        # Имя временной таблицы БЕЗ схемы (временные таблицы создаются в pg_temp автоматически)
+        temp_table = f"{PG_TABLE}_temp"
+        
+        # Удаляем временную таблицу если она уже существует
+        drop_temp_table_query = f"DROP TABLE IF EXISTS {temp_table};"
+        
+        # Создаем временную таблицу с уникальными записями
+        # Дедупликация по: company, upd_number, cost, date
+        create_temp_table_query = f"""
+        CREATE TEMP TABLE {temp_table} AS
+        SELECT DISTINCT ON (company, upd_number, date, cost)
+            company, upd_number, date, item_name, cost, created_at, updated_at
+        FROM {PG_SCHEMA}.{PG_TABLE}
+        ORDER BY company, upd_number, date, cost, updated_at DESC;
         """
         
+        # Удаляем все данные из основной таблицы
+        truncate_query = f"TRUNCATE TABLE {PG_SCHEMA}.{PG_TABLE};"
+        
+        # Вставляем уникальные данные обратно
+        insert_back_query = f"""
+        INSERT INTO {PG_SCHEMA}.{PG_TABLE} (company, upd_number, date, item_name, cost, created_at, updated_at)
+        SELECT company, upd_number, date, item_name, cost, created_at, updated_at
+        FROM {temp_table};
+        """
+        
+        # Удаляем временную таблицу после использования
+        drop_temp_after_query = f"DROP TABLE IF EXISTS {temp_table};"
+        
+        # Получаем количество записей до дедупликации
+        count_before_query = f"SELECT COUNT(*) FROM {PG_SCHEMA}.{PG_TABLE};"
+        
         with engine.begin() as conn:
-            result = conn.execute(text(deduplicate_query))
-            deleted_rows = result.rowcount
+            # Считаем записи до дедупликации
+            result = conn.execute(text(count_before_query))
+            count_before = result.scalar()
+            
+            # Выполняем дедупликацию
+            conn.execute(text(drop_temp_table_query))  # Удаляем старую временную таблицу
+            conn.execute(text(create_temp_table_query))
+            conn.execute(text(truncate_query))
+            conn.execute(text(insert_back_query))
+            conn.execute(text(drop_temp_after_query))  # Очищаем временную таблицу
+            
+            # Считаем записи после дедупликации
+            result = conn.execute(text(count_before_query))
+            count_after = result.scalar()
+        
+        deleted_rows = count_before - count_after
         
         if deleted_rows > 0:
             print(f"  ✓ Удалено {deleted_rows} дубликатов из таблицы")
@@ -565,7 +623,7 @@ df = get_sheet_data_as_dataframe(credentials_file, spreadsheet_key, sheet_name)
 df = df[(df['API ключ'] != '') & (df['API ключ'] != None) & ~((df['Имя Юрлица'] == 'TD') | (df['Имя Юрлица'] == 'ИП Крапивина С.А.'))]
 
 # Для теста можно раскомментировать (тестируем на одной компании):
-#df = df[df['Имя Юрлица']=='ИП Баах И.Л.']
+#df = df[df['Имя Юрлица']=='ИП Солоджук Е. Г']
 
 dict_api = dict(zip(df['API ключ'], df['Имя Юрлица']))
 print(f"Найдено {len(dict_api)} компаний для обработки\n")

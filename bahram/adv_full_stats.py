@@ -22,13 +22,52 @@ df_keys = df_keys[df_keys['API ключ'].notnull() & (df_keys['API ключ'] !
 
 dict_api = dict(zip(df_keys['API ключ'], df_keys['Имя Юрлица']))
 
+# ТЕСТОВЫЙ РЕЖИМ: работаем только с ИП Баах Р.Н.
+test_company = "ИП Баах Р.Н."
+dict_api = {k: v for k, v in dict_api.items() if v == test_company}
+print(f"ТЕСТОВЫЙ РЕЖИМ: обрабатываем только компанию '{test_company}'")
+print(f"Найдено API ключей для тестирования: {len(dict_api)}")
+
 # === Параметры дат ===
 end_date = datetime.now().date()
-begin_date = end_date - timedelta(days=30)
-begin_date_str = begin_date.strftime('%Y-%m-%d')
-end_date_str = end_date.strftime('%Y-%m-%d')
+begin_date = end_date - timedelta(days=60)
 
-print(f"Период запроса: {begin_date_str} - {end_date_str}")
+print(f"Общий период запроса: {begin_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+
+def generate_date_periods(start_date, end_date, period_days=31):
+    """
+    Генерирует список периодов по period_days дней для обхода ограничений API
+    
+    Args:
+        start_date: начальная дата
+        end_date: конечная дата  
+        period_days: максимальное количество дней в периоде (по умолчанию 31)
+    
+    Returns:
+        List of tuples: [(begin_date_str, end_date_str), ...]
+    """
+    periods = []
+    current_start = start_date
+    
+    while current_start <= end_date:
+        # Вычисляем конец текущего периода
+        current_end = min(current_start + timedelta(days=period_days - 1), end_date)
+        
+        periods.append((
+            current_start.strftime('%Y-%m-%d'),
+            current_end.strftime('%Y-%m-%d')
+        ))
+        
+        # Переходим к следующему периоду
+        current_start = current_end + timedelta(days=1)
+    
+    return periods
+
+# Генерируем периоды по 31 дню
+date_periods = generate_date_periods(begin_date, end_date, 31)
+print(f"Создано {len(date_periods)} периодов по 31 дню:")
+for i, (start, end) in enumerate(date_periods, 1):
+    print(f"  Период {i}: {start} - {end}")
 
 # === Функция для загрузки данных в PostgreSQL ===
 def upload_to_postgres(df, table_name='adv_fullstats', schema='reports', chunk_size=1000):
@@ -188,22 +227,34 @@ def get_campaigns(api_key, company_name):
     """Получение списка рекламных кампаний"""
     url = "https://advert-api.wildberries.ru/adv/v1/promotion/count"
     headers = {"Authorization": api_key}
+    print(f"[{company_name}] Запрашиваем список кампаний...")
+    
     for attempt in range(5):  # попытки при ошибке
         try:
+            print(f"[{company_name}] Попытка {attempt+1}/5 запроса campaigns...")
             resp = requests.get(url, headers=headers, timeout=30)
+            print(f"[{company_name}] Получен ответ: {resp.status_code}")
+            
             if resp.status_code == 200:
                 data = resp.json()
                 print(f"[{company_name}] Получен ответ от promotion/count")
                 return data.get('adverts', [])
+            elif resp.status_code == 429:
+                # Обработка ошибки "too many requests"
+                wait_time = 60 + (attempt * 30)  # увеличиваем время ожидания с каждой попыткой
+                print(f"[{company_name}] Ошибка 429 (too many requests), попытка {attempt+1}/5, ожидание {wait_time} сек")
+                time.sleep(wait_time)
             else:
-                print(f"[{company_name}] Ошибка запроса campaigns: {resp.status_code}, повтор через 2 сек")
-                time.sleep(2)
+                print(f"[{company_name}] Ошибка запроса campaigns: {resp.status_code}, попытка {attempt+1}/5")
+                time.sleep(5)  # увеличиваем паузу
         except Exception as e:
             print(f"[{company_name}] Исключение при запросе campaigns: {e}, попытка {attempt+1}/5")
-            time.sleep(2)
+            time.sleep(5)
+    
+    print(f"[{company_name}] Не удалось получить список кампаний после 5 попыток")
     return []
 
-def get_fullstats(api_key, ids, company_name):
+def get_fullstats(api_key, ids, company_name, begin_date_str, end_date_str):
     """Получение полной статистики по кампаниям"""
     url = "https://advert-api.wildberries.ru/adv/v3/fullstats"
     headers = {"Authorization": api_key}
@@ -212,18 +263,58 @@ def get_fullstats(api_key, ids, company_name):
         "beginDate": begin_date_str,
         "endDate": end_date_str
     }
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=60)
-        if resp.status_code == 200:
-            print(f"[{company_name}] Получена статистика для {len(ids)} кампаний")
-            return resp.json()
-        else:
-            print(f"[{company_name}] Ошибка запроса fullstats: {resp.status_code}")
-            print(f"[{company_name}] Ответ: {resp.text[:200]}")
-            return []
-    except Exception as e:
-        print(f"[{company_name}] Исключение при запросе fullstats: {e}")
-        return []
+    
+    for attempt in range(5):  # попытки при ошибке
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
+            if resp.status_code == 200:
+                print(f"[{company_name}] Получена статистика для {len(ids)} кампаний за период {begin_date_str} - {end_date_str}")
+                return resp.json()
+            elif resp.status_code == 429:
+                # Обработка ошибки "too many requests"
+                wait_time = 60 + (attempt * 30)  # увеличиваем время ожидания с каждой попыткой
+                print(f"[{company_name}] Ошибка 429 (too many requests), попытка {attempt+1}/5, ожидание {wait_time} сек")
+                time.sleep(wait_time)
+            elif resp.status_code == 400:
+                # Обработка ошибки "invalid advert status id" 
+                print(f"[{company_name}] Ошибка 400 (invalid advert status)")
+                print(f"[{company_name}] Ответ: {resp.text[:300]}")
+                
+                # Попробуем запросить статистику для каждой кампании отдельно
+                if len(ids) > 1:
+                    print(f"[{company_name}] Пробуем запросить статистику для каждой кампании отдельно...")
+                    individual_results = []
+                    for single_id in ids:
+                        try:
+                            single_resp = requests.get(url, headers=headers, params={
+                                "ids": str(single_id),
+                                "beginDate": begin_date_str,
+                                "endDate": end_date_str
+                            }, timeout=60)
+                            if single_resp.status_code == 200:
+                                individual_results.extend(single_resp.json())
+                                print(f"[{company_name}] ✓ Получена статистика для кампании {single_id}")
+                            else:
+                                print(f"[{company_name}] ✗ Кампания {single_id}: ошибка {single_resp.status_code}")
+                        except Exception as e:
+                            print(f"[{company_name}] ✗ Кампания {single_id}: исключение {e}")
+                        time.sleep(1)  # небольшая пауза между запросами
+                    
+                    if individual_results:
+                        print(f"[{company_name}] Получена статистика для {len(individual_results)} кампаний из {len(ids)}")
+                        return individual_results
+                
+                return []  # возвращаем пустой список если ничего не получилось
+            else:
+                print(f"[{company_name}] Ошибка запроса fullstats: {resp.status_code}, попытка {attempt+1}/5")
+                print(f"[{company_name}] Ответ: {resp.text[:200]}")
+                time.sleep(5)  # небольшая пауза перед повтором
+        except Exception as e:
+            print(f"[{company_name}] Исключение при запросе fullstats: {e}, попытка {attempt+1}/5")
+            time.sleep(5)
+    
+    print(f"[{company_name}] Не удалось получить данные после 5 попыток")
+    return []
 
 # === Парсинг JSON структурированно ===
 def parse_fullstats_detailed(data, company_name):
@@ -340,10 +431,13 @@ total_companies_processed = 0
 for api_key, company_name in dict_api.items():
     print(f"\n{'='*60}")
     print(f"Обрабатываем компанию: {company_name}")
+    print(f"API ключ: {api_key[:10]}...{api_key[-4:]}")
     print(f"{'='*60}")
     
     # Получаем список кампаний
+    print(f"[{company_name}] Начинаем получение списка кампаний...")
     campaigns = get_campaigns(api_key, company_name)
+    print(f"[{company_name}] Завершено получение списка кампаний")
     
     if not campaigns:
         print(f"[{company_name}] Не найдено кампаний, пропускаем")
@@ -351,6 +445,7 @@ for api_key, company_name in dict_api.items():
     
     # Извлекаем ID кампаний
     campaign_ids = []
+    
     for c in campaigns:
         advert_list = c.get("advert_list", [])
         for adv in advert_list:
@@ -363,37 +458,55 @@ for api_key, company_name in dict_api.items():
     if not campaign_ids:
         continue
     
+    # Примечание: API promotion/count не возвращает статус кампаний
+    # Будем пробовать запрашивать статистику для всех кампаний
+    # и обрабатывать ошибки 400 индивидуально
+    print(f"[{company_name}] Попробуем запросить статистику для всех {len(campaign_ids)} кампаний")
+    
     # Массив для накопления данных текущей компании
     company_data = []
     
-    # Разбиваем на пачки по 100 ID (лимит API)
-    batch_size = 100
-    total_batches = (len(campaign_ids) - 1) // batch_size + 1
-    
-    for i in range(0, len(campaign_ids), batch_size):
-        batch_ids = campaign_ids[i:i+batch_size]
-        batch_num = i // batch_size + 1
+    # Обрабатываем каждый период по 31 дню
+    for period_num, (period_start, period_end) in enumerate(date_periods, 1):
+        print(f"\n[{company_name}] Период {period_num}/{len(date_periods)}: {period_start} - {period_end}")
         
-        print(f"[{company_name}] Обрабатываем партию {batch_num}/{total_batches} ({len(batch_ids)} кампаний)")
+        # Разбиваем на пачки по 100 ID (лимит API)
+        batch_size = 100
+        total_batches = (len(campaign_ids) - 1) // batch_size + 1
         
-        # Получаем статистику
-        stats = get_fullstats(api_key, batch_ids, company_name)
-        
-        if stats:
-            # Парсим данные детально
-            df_stats = parse_fullstats_detailed(stats, company_name)
+        for i in range(0, len(campaign_ids), batch_size):
+            batch_ids = campaign_ids[i:i+batch_size]
+            batch_num = i // batch_size + 1
             
-            if not df_stats.empty:
-                df_stats["company"] = company_name
-                df_stats["api_key_last4"] = api_key[-4:]
-                company_data.append(df_stats)
+            print(f"[{company_name}] Период {period_num}, партия {batch_num}/{total_batches} ({len(batch_ids)} кампаний)")
+            
+            # Получаем статистику для текущего периода
+            stats = get_fullstats(api_key, batch_ids, company_name, period_start, period_end)
+            
+            if stats:
+                # Парсим данные детально
+                df_stats = parse_fullstats_detailed(stats, company_name)
+                
+                if not df_stats.empty:
+                    df_stats["company"] = company_name
+                    df_stats["api_key_last4"] = api_key[-4:]
+                    company_data.append(df_stats)
+                else:
+                    print(f"[{company_name}] Пустой DataFrame после парсинга")
             else:
-                print(f"[{company_name}] Пустой DataFrame после парсинга")
+                # Если не удалось получить данные (возможно из-за 429), увеличиваем паузу
+                print(f"[{company_name}] Данные не получены, увеличиваем паузу до 120 сек...")
+                time.sleep(120)
+            
+            # Ждем перед следующим запросом (лимит: 1 запрос/мин для fullstats)
+            if batch_num < total_batches:
+                print(f"[{company_name}] Ожидание 60 сек перед следующим запросом...")
+                time.sleep(60)
         
-        # Ждем перед следующим запросом (лимит: 1 запрос/мин для fullstats)
-        if batch_num < total_batches:
-            print(f"[{company_name}] Ожидание 60 сек перед следующим запросом...")
-            time.sleep(60)
+        # Небольшая пауза между периодами
+        if period_num < len(date_periods):
+            print(f"[{company_name}] Пауза 5 сек перед следующим периодом...")
+            time.sleep(5)
     
     # Загружаем данные текущей компании в PostgreSQL сразу после обработки
     if company_data:
