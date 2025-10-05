@@ -1,4 +1,9 @@
 SELECT 
+    supplier AS supplier_name,
+    realizationreport_id,
+    COALESCE(MAX(create_dt::date), date_from::date) AS report_date,
+    date_from,
+    date_to,
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS prodazha_do_komissii,
     SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS vozvrat_do_komissii,
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) AS prodazha_posle_komissii,
@@ -50,24 +55,28 @@ SELECT
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) -
     SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)) AS komossia,
     
-(
-  (
-    SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
-    - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
-    - (
-        SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END)
-        - SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)
-      )
-  )
-  /
-  (
-    SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
-    - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
-  )
-) AS margin_after_commission,
+CASE 
+    WHEN (SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)) != 0 
+    THEN
+        (
+          SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - (
+              SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END)
+              - SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)
+            )
+        )
+        /
+        (
+          SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+        )
+    ELSE 0
+END AS margin_after_commission,
 (
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) -
-    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)) AS "К_перечислению_за_товар",
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)) AS to_transfer_for_goods,
     SUM(
         CASE 
             WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
@@ -151,7 +160,6 @@ SELECT
             ELSE 0
         END
     ) AS storage_recalculation_total,
-        SUM(storage_fee::numeric) AS storage_fee_total,
         SUM(
         CASE 
             WHEN supplier_oper_name = 'Корректировка хранения' THEN storage_fee::numeric
@@ -345,4 +353,5 @@ SUM(
     ELSE 0
 END AS profit_after_all
 FROM reports.detail_finance_reports
-
+GROUP BY supplier, realizationreport_id, date_from, date_to
+ORDER BY supplier, date_from, date_to;
