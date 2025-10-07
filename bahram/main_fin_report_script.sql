@@ -1,9 +1,10 @@
-SELECT 
+WITH base AS (SELECT 
     supplier AS supplier_name,
     realizationreport_id,
-    COALESCE(MAX(create_dt::date), date_from::date) AS report_date,
-    date_from,
-    date_to,
+    create_dt::date AS report_date,
+    date_from::date,
+    date_to::date,
+    report_type,
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS prodazha_do_komissii,
     SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS vozvrat_do_komissii,
     SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) AS prodazha_posle_komissii,
@@ -353,5 +354,48 @@ SUM(
     ELSE 0
 END AS profit_after_all
 FROM reports.detail_finance_reports
-GROUP BY supplier, realizationreport_id, date_from, date_to
-ORDER BY supplier, date_from, date_to;
+WHERE create_dt::date>='2025-09-01'
+GROUP BY     supplier,
+    realizationreport_id,
+    create_dt::date,
+    date_from::date,
+    date_to::date,
+    report_type
+ORDER BY supplier, date_from, date_to)
+SELECT
+    b.*,
+    COALESCE(
+        ui.amount,
+        CASE 
+            WHEN r.redemption_total IS NOT NULL THEN r.redemption_total - b.vozvrat_posle_komissii
+            ELSE NULL
+        END
+    ) AS total_to_transfer_from_documents,
+    CASE 
+        WHEN ABS(
+            b.total_to_transfer - COALESCE(
+                ui.amount,
+                CASE 
+                    WHEN r.redemption_total IS NOT NULL THEN r.redemption_total - b.vozvrat_posle_komissii
+                    ELSE NULL
+                END
+            )
+        ) <= 5 THEN true
+        ELSE false
+    END AS is_equal
+FROM base b
+LEFT JOIN documents.upd_items ui
+    ON b.realizationreport_id::text = ui.report_number
+   AND ui.item_name = 'Итого к перечислению Продавцу за текущий период с учетом Вознаграждений и возвратов Товаров'
+   AND ui.report_type = 'weekly_sales'
+LEFT JOIN (
+    SELECT 
+        redemption_number,
+        SUM(amount) AS redemption_total,
+        company
+    FROM documents.upd_items
+    WHERE redemption_number IS NOT NULL
+    GROUP BY redemption_number, company
+) r
+    ON b.realizationreport_id::text = r.redemption_number
+ORDER BY b.supplier_name, b.date_from, b.date_to;
