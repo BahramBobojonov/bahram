@@ -5,12 +5,14 @@ SELECT
   COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) AS date_from,
   COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) AS date_to,
   COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) AS rr_dt,
+
   CASE 
     WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
     WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
     WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
     ELSE 0
   END AS storage_fee_total,
+
   COALESCE(c.total_acceptance, 0) AS total_acceptance,
   COALESCE(d.sum_deduction, 0) AS deduction_adv_total,
   COALESCE(f.total_deduction, 0) AS deduction_writeoff_total,
@@ -53,69 +55,13 @@ SELECT
   COALESCE(a.storage_correction_total, 0) AS storage_correction_total,
   COALESCE(a.acceptance_recalculation_total, 0) AS acceptance_recalculation_total,
   COALESCE(a.deduction_other_total, 0) AS deduction_other_total,
-  (
-  COALESCE(a.to_transfer_for_goods::numeric, 0)
-)
--
-  COALESCE(a.logistics_total::numeric, 0)
--
-  COALESCE(a.penalties_total::numeric, 0)
--
-  COALESCE(a.additional_payment_total::numeric, 0)
--
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
-    ELSE 0
-END
--
-COALESCE(c.total_acceptance::numeric, 0)
--
-COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
--
-COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
--
-COALESCE(a.deduction_other_total::numeric, 0) -- deduction_other_total
-AS total_to_transfer,
-  COALESCE(a.net_retail_amount, 0) AS net_retail_amount
-  ,(
-      COALESCE(a.net_retail_amount, 0)
-    - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))
-) AS net_amount_after_vat,
-(  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))) AS vat_amount,
-((  COALESCE(a.net_retail_amount, 0) - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
- * CAST(:tax_rate AS numeric)) AS tax_to_pay,
- ((
-  COALESCE(a.to_transfer_for_goods::numeric, 0)
-)
--
-  COALESCE(a.logistics_total::numeric, 0)
--
-  COALESCE(a.penalties_total::numeric, 0)
--
-  COALESCE(a.additional_payment_total::numeric, 0)
--
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
-    ELSE 0
-END
--
-COALESCE(c.total_acceptance::numeric, 0)
--
-COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
--
-COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
--
-COALESCE(a.deduction_other_total::numeric, 0)
-)
---
-- (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))  -- vat_amount
-- ((COALESCE(a.net_retail_amount, 0) 
-     - (COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
-   * CAST(:tax_rate AS numeric)) AS profit_after_all  -- tax_amoun
+  COALESCE(a.total_to_transfer, 0) AS total_to_transfer,
+  COALESCE(a.net_retail_amount, 0) AS net_retail_amount,
+  COALESCE(a.net_amount_after_vat, 0) AS net_amount_after_vat,
+  COALESCE(a.tax_to_pay, 0) AS tax_to_pay,
+  COALESCE(a.vat_amount, 0) AS vat_amount,
+  COALESCE(a.profit_after_all, 0) AS profit_after_all
+
 FROM reports.mv_detail_finance_reports_v1 a
 FULL JOIN reports.v_storage_fee_by_nmid b
   ON a.rr_dt = b.date
