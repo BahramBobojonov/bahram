@@ -286,7 +286,20 @@ SUM(acceptance::numeric)
 -
 -- Вычеты / deduction
 SUM(deduction::numeric)
-AS total_to_transfer
+AS total_to_transfer,
+SUM(
+        CASE 
+            WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric
+            ELSE 0
+        END
+    )
+    -
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric
+            ELSE 0
+        END
+    ) AS net_retail_amount
 FROM reports.detail_finance_reports
 WHERE date_from::date >= '2025-08-25'
 GROUP BY     supplier,

@@ -1,142 +1,369 @@
 SELECT 
-  COALESCE(a.supplier_name, b.supplier, c.supplier, d.supplier, f.supplier) AS supplier_name,
-  COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id, d.realizationreport_id, f.realizationreport_id) AS realizationreport_id,
-  COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint) AS nm_id,
-  COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) AS date_from,
-  COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) AS date_to,
-  COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) AS rr_dt,
-  CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
+    supplier AS supplier_name,
+    realizationreport_id,
+    nm_id,
+    date_from::date,
+    date_to::date,
+rr_dt::date,
+    SUM(
+        CASE
+            WHEN doc_type_name = 'Продажа'
+                 AND supplier_oper_name = 'Продажа'
+            THEN quantity::numeric
+            ELSE 0
+        END
+    ) AS quantity_sales,
+
+    SUM(
+        CASE
+            WHEN doc_type_name = 'Возврат'
+                 AND supplier_oper_name = 'Возврат'
+            THEN quantity::numeric
+            ELSE 0
+        END
+    ) AS quantity_returns,
+
+    (
+        SUM(
+            CASE
+                WHEN doc_type_name = 'Продажа'
+                     AND supplier_oper_name = 'Продажа'
+                THEN quantity::numeric
+                ELSE 0
+            END
+        )
+        -
+        SUM(
+            CASE
+                WHEN doc_type_name = 'Возврат'
+                     AND supplier_oper_name = 'Возврат'
+                THEN quantity::numeric
+                ELSE 0
+            END
+        )
+    ) AS net_quantity,
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS prodazha_do_komissii,
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END) AS vozvrat_do_komissii,
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) AS prodazha_posle_komissii,
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END) AS vozvrat_posle_komissii,
+    SUM(acquiring_fee::numeric) AS acquiring_fee_sum,
+    SUM(CASE WHEN supplier_oper_name = 'Корректировка эквайринга' THEN ppvz_for_pay::numeric ELSE 0 END) AS korrektirovka_ekvayringa,
+    SUM(CASE WHEN supplier_oper_name = 'Добровольная компенсация при возврате' THEN ppvz_for_pay::numeric ELSE 0 END) AS kompensaciya_pri_vozvrate,
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Продажа' 
+             AND supplier_oper_name = 'Компенсация ущерба' 
+            THEN ppvz_for_pay::numeric 
+            ELSE 0 
+        END
+    ) AS kompensaciya_uscherba_prodazha,
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Возврат' 
+             AND supplier_oper_name = 'Компенсация ущерба' 
+            THEN ppvz_for_pay::numeric 
+            ELSE 0 
+        END
+    ) AS kompensaciya_uscherba_vozvrat,
+    SUM(CASE WHEN supplier_oper_name = 'Оплата брака' THEN ppvz_for_pay::numeric ELSE 0 END) AS oplata_braka,
+    SUM(CASE WHEN supplier_oper_name = 'Частичная компенсация брака' THEN ppvz_for_pay::numeric ELSE 0 END) AS chastichnaya_kompensaciya_braka,
+    SUM(CASE WHEN supplier_oper_name = 'Компенсация брака' THEN ppvz_for_pay::numeric ELSE 0 END) AS kompensaciya_braka,
+    SUM(CASE WHEN supplier_oper_name = 'Компенсация подмененного товара' THEN ppvz_for_pay::numeric ELSE 0 END) AS kompensaciya_podmenennogo_tovara,
+    SUM(CASE WHEN supplier_oper_name = 'Оплата потерянного товара' THEN ppvz_for_pay::numeric ELSE 0 END) AS oplata_poteryannogo_tovara,
+    SUM(CASE WHEN supplier_oper_name = 'Компенсация потерянного товара' THEN ppvz_for_pay::numeric ELSE 0 END) AS kompensaciya_poteryannogo_tovara,
+    SUM(CASE WHEN supplier_oper_name = 'Оплата по итогам инвентаризации' THEN ppvz_for_pay::numeric ELSE 0 END) AS oplata_po_itogam_inventarizacii,
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Продажа' 
+             AND supplier_oper_name = 'Авансовая оплата за товар без движения' 
+            THEN ppvz_for_pay::numeric 
+            ELSE 0 
+        END
+    ) AS avansovaya_oplata_bez_dvizheniya_prodazha,
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Возврат' 
+             AND supplier_oper_name = 'Авансовая оплата за товар без движения' 
+            THEN ppvz_for_pay::numeric 
+            ELSE 0 
+        END
+    ) AS avansovaya_oplata_bez_dvizheniya_vozvrat,
+    (SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END) - 
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END))- (
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) -
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)) AS komossia,
+    
+CASE 
+    WHEN (SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)) != 0 
+    THEN
+        (
+          SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - (
+              SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END)
+              - SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)
+            )
+        )
+        /
+        (
+          SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_price_withdisc_rub::numeric ELSE 0 END)
+        )
     ELSE 0
-  END AS storage_fee_total,
-  COALESCE(c.total_acceptance, 0) AS total_acceptance,
-  COALESCE(d.sum_deduction, 0) AS deduction_adv_total,
-  COALESCE(f.total_deduction, 0) AS deduction_writeoff_total,
-  COALESCE(a.quantity_sales, 0) AS quantity_sales,
-  COALESCE(a.quantity_returns, 0) AS quantity_returns,
-  COALESCE(a.net_quantity, 0) AS net_quantity,
-  COALESCE(a.prodazha_do_komissii, 0) AS prodazha_do_komissii,
-  COALESCE(a.vozvrat_do_komissii, 0) AS vozvrat_do_komissii,
-  COALESCE(a.prodazha_posle_komissii, 0) AS prodazha_posle_komissii,
-  COALESCE(a.vozvrat_posle_komissii, 0) AS vozvrat_posle_komissii,
-  COALESCE(a.acquiring_fee_sum, 0) AS acquiring_fee_sum,
-  COALESCE(a.korrektirovka_ekvayringa, 0) AS korrektirovka_ekvayringa,
-  COALESCE(a.kompensaciya_pri_vozvrate, 0) AS kompensaciya_pri_vozvrate,
-  COALESCE(a.kompensaciya_uscherba_prodazha, 0) AS kompensaciya_uscherba_prodazha,
-  COALESCE(a.kompensaciya_uscherba_vozvrat, 0) AS kompensaciya_uscherba_vozvrat,
-  COALESCE(a.oplata_braka, 0) AS oplata_braka,
-  COALESCE(a.chastichnaya_kompensaciya_braka, 0) AS chastichnaya_kompensaciya_braka,
-  COALESCE(a.kompensaciya_braka, 0) AS kompensaciya_braka,
-  COALESCE(a.kompensaciya_podmenennogo_tovara, 0) AS kompensaciya_podmenennogo_tovara,
-  COALESCE(a.oplata_poteryannogo_tovara, 0) AS oplata_poteryannogo_tovara,
-  COALESCE(a.kompensaciya_poteryannogo_tovara, 0) AS kompensaciya_poteryannogo_tovara,
-  COALESCE(a.oplata_po_itogam_inventarizacii, 0) AS oplata_po_itogam_inventarizacii,
-  COALESCE(a.avansovaya_oplata_bez_dvizheniya_prodazha, 0) AS avansovaya_oplata_bez_dvizheniya_prodazha,
-  COALESCE(a.avansovaya_oplata_bez_dvizheniya_vozvrat, 0) AS avansovaya_oplata_bez_dvizheniya_vozvrat,
-  COALESCE(a.komossia, 0) AS komossia,
-  COALESCE(a.margin_after_commission, 0) AS margin_after_commission,
-  COALESCE(a.to_transfer_for_goods, 0) AS to_transfer_for_goods,
-  COALESCE(a.logistics_total, 0) AS logistics_total,
-  COALESCE(a.logistics_count, 0) AS logistics_count,
-  COALESCE(a.logistics_storno_count, 0) AS logistics_storno_count,
-  COALESCE(a.correction_count, 0) AS correction_count,
-  COALESCE(a.logistics_return_positive_total, 0) AS logistics_return_positive_total,
-  COALESCE(a.logistics_return_positive_count, 0) AS logistics_return_positive_count,
-  COALESCE(a.bonus_return_total, 0) AS bonus_return_total,
-  COALESCE(a.bonus_return_count, 0) AS bonus_return_count,
-  COALESCE(a.logistics_positive_total, 0) AS logistics_positive_total,
-  COALESCE(a.penalties_total, 0) AS penalties_total,
-  COALESCE(a.additional_payment_total, 0) AS additional_payment_total,
-  COALESCE(a.storage_recalculation_total, 0) AS storage_recalculation_total,
-  COALESCE(a.storage_correction_total, 0) AS storage_correction_total,
-  COALESCE(a.acceptance_recalculation_total, 0) AS acceptance_recalculation_total,
-  COALESCE(a.deduction_other_total, 0) AS deduction_other_total,
-  (
-  COALESCE(a.to_transfer_for_goods::numeric, 0)
+END AS margin_after_commission,
+(
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) -
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)) AS to_transfer_for_goods,
+    SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
+            WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+            WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
+            ELSE 0
+        END
+    ) AS logistics_total,
+    
+    COUNT(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика' THEN 1
+        END
+    ) AS logistics_count,
+    
+    COUNT(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика сторно' THEN 1
+        END
+    ) AS logistics_storno_count,
+    
+    COUNT(
+        CASE 
+            WHEN supplier_oper_name = 'Коррекция логистики' THEN 1
+        END
+    ) AS correction_count,
+    
+    SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика' AND return_amount::numeric > 0
+            THEN delivery_rub::numeric
+            ELSE 0
+        END
+    ) AS logistics_return_positive_total,
+    
+    COUNT(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика' AND return_amount::numeric > 0
+            THEN 1
+        END
+    ) AS logistics_return_positive_count,
+    
+    SUM(
+        CASE 
+            WHEN doc_type_name = 'Логистика' AND bonus_type_name = 'Возврат брака (К продавцу)' 
+            THEN delivery_rub::numeric
+            ELSE 0
+        END
+    ) AS bonus_return_total,
+    
+    COUNT(
+        CASE 
+            WHEN doc_type_name = 'Логистика' AND bonus_type_name = 'Возврат брака (К продавцу)' 
+            THEN 1
+        END
+    ) AS bonus_return_count,
+        SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Логистика' AND delivery_amount::numeric > 0
+            THEN delivery_rub::numeric
+            ELSE 0
+        END
+    ) AS logistics_positive_total,
+        SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Штраф' THEN penalty::numeric
+            WHEN supplier_oper_name = 'Штрафы и доплаты' THEN penalty::numeric
+            ELSE 0
+        END
+    ) AS penalties_total,
+        SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Доплаты' THEN additional_payment::numeric
+            ELSE 0
+        END
+    ) AS additional_payment_total,
+    SUM(storage_fee::numeric) AS storage_fee_total,
+        SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Пересчет хранения' THEN storage_fee::numeric
+            ELSE 0
+        END
+    ) AS storage_recalculation_total,
+        SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Корректировка хранения' THEN storage_fee::numeric
+            ELSE 0
+        END
+    ) AS storage_correction_total,
+        SUM(acceptance::numeric) AS acceptance_total,
+                SUM(
+        CASE 
+            WHEN supplier_oper_name = 'Пересчет платной приемки' THEN acceptance::numeric
+            ELSE 0
+        END
+    ) AS acceptance_recalculation_total,
+    SUM(deduction::numeric) AS deduction_total,
+        SUM(
+        CASE 
+            WHEN deduction::numeric < 0 THEN deduction::numeric
+            ELSE 0
+        END
+    ) AS deduction_negative_total,
+        SUM(
+        CASE 
+            WHEN deduction::numeric > 0 THEN deduction::numeric
+            ELSE 0
+        END
+    ) AS deduction_positive_total,
+        SUM(
+        CASE 
+            WHEN bonus_type_name LIKE 'Списание за отзыв%' THEN deduction::numeric
+            ELSE 0
+        END
+    ) AS deduction_writeoff_total,
+            SUM(
+        CASE 
+            WHEN bonus_type_name LIKE '%Продвижение%' THEN deduction::numeric
+            ELSE 0
+        END
+    ) AS deduction_adv_total,
+SUM(
+    CASE 
+        WHEN bonus_type_name NOT LIKE '%Продвижение%' 
+         AND bonus_type_name NOT LIKE 'Списание за отзыв%' 
+        THEN deduction::numeric
+        ELSE 0
+    END
+) AS deduction_other_total,
+(
+    -- К перечислению за товар
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END) -
+    SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END)
 )
 -
-  COALESCE(a.logistics_total::numeric, 0)
+-- Логистика
+SUM(
+    CASE 
+        WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
+        WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+        WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
+        ELSE 0
+    END
+)
 -
-  COALESCE(a.penalties_total::numeric, 0)
+-- Штрафы
+SUM(
+    CASE 
+        WHEN supplier_oper_name = 'Штраф' THEN penalty::numeric
+        WHEN supplier_oper_name = 'Штрафы и доплаты' THEN penalty::numeric
+        ELSE 0
+    END
+)
 -
-  COALESCE(a.additional_payment_total::numeric, 0)
+-- Доплаты
+SUM(
+    CASE 
+        WHEN supplier_oper_name = 'Доплаты' THEN additional_payment::numeric
+        ELSE 0
+    END
+)
 -
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
-    ELSE 0
-END
+-- Хранение
+SUM(storage_fee::numeric)
 -
-COALESCE(c.total_acceptance::numeric, 0)
+-- Приемка
+SUM(acceptance::numeric)
 -
-COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
--
-COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
--
-COALESCE(a.deduction_other_total::numeric, 0) -- deduction_other_total
+-- Вычеты / deduction
+SUM(deduction::numeric)
 AS total_to_transfer,
-  COALESCE(a.net_retail_amount, 0) AS net_retail_amount
-  ,(
-      COALESCE(a.net_retail_amount, 0)
-    - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))
-) AS net_amount_after_vat,
-(  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))) AS vat_amount,
-((  COALESCE(a.net_retail_amount, 0) - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
- * CAST(:tax_rate AS numeric)) AS tax_to_pay,
- ((
-  COALESCE(a.to_transfer_for_goods::numeric, 0)
-)
--
-  COALESCE(a.logistics_total::numeric, 0)
--
-  COALESCE(a.penalties_total::numeric, 0)
--
-  COALESCE(a.additional_payment_total::numeric, 0)
--
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
+-- Чистая выручка
+    SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+    - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END) AS net_retail_amount,
+
+ -- Чистая выручка без НДС
+    (SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+     - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END)
+     - ((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+         - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+        * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))
+    ) AS net_amount_after_vat,
+    -- НДС
+    ((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+      - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+     * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))) AS vat_amount, 
+    -- Налог к уплате
+    (((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+       - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+       - ((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+           - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+          * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
+     * CAST(:tax_rate AS numeric)) AS tax_to_pay,
+     -- Чистая прибыль до учета storage/acceptance/deduction
+CASE
+    WHEN (SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+          - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END)) > 0
+    THEN
+        (
+            -- Разница ppvz_for_pay по продажам/возвратам
+            (SUM(CASE WHEN doc_type_name = 'Продажа' THEN ppvz_for_pay::numeric ELSE 0 END)
+             - SUM(CASE WHEN doc_type_name = 'Возврат' THEN ppvz_for_pay::numeric ELSE 0 END))
+            -
+            -- Логистика
+            SUM(
+                CASE 
+                    WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
+                    WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+                    WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
+                    ELSE 0
+                END
+            )
+            -
+            -- Штрафы
+            SUM(
+                CASE 
+                    WHEN supplier_oper_name IN ('Штраф','Штрафы и доплаты') THEN penalty::numeric
+                    ELSE 0
+                END
+            )
+            -
+            -- Доплаты
+            SUM(
+                CASE 
+                    WHEN supplier_oper_name = 'Доплаты' THEN additional_payment::numeric
+                    ELSE 0
+                END
+            )
+            -
+            -- Налог
+            (((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+               - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+              - ((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+                  - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+                 * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))) * CAST(:tax_rate AS numeric))
+            -
+            -- VAT
+            ((SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_amount::numeric ELSE 0 END)
+              - SUM(CASE WHEN doc_type_name = 'Возврат' THEN retail_amount::numeric ELSE 0 END))
+             * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))
+        )
     ELSE 0
-END
--
-COALESCE(c.total_acceptance::numeric, 0)
--
-COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
--
-COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
--
-COALESCE(a.deduction_other_total::numeric, 0)
-)
---
-- (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))  -- vat_amount
-- ((COALESCE(a.net_retail_amount, 0) 
-     - (COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
-   * CAST(:tax_rate AS numeric)) AS profit_after_all  -- tax_amoun
-FROM reports.mv_detail_finance_reports_v1 a
-FULL JOIN reports.v_storage_fee_by_nmid b
-  ON a.rr_dt = b.date
- AND a.nm_id = b.nmid::bigint
-FULL JOIN reports.v_acceptance_by_nm_id c
-  ON COALESCE(a.rr_dt, b.date) = c.rr_dt
- AND COALESCE(a.nm_id, b.nmid::bigint) = c.nm_id
-FULL JOIN (
-  SELECT 
-    nm_id::bigint, 
-    sale_dt::date, 
-    date_from::date, 
-    date_to::date, 
-    realizationreport_id, 
-    supplier, 
-    SUM(deduction) AS sum_deduction
-  FROM reports.v_deduction_by_nm_id
-  GROUP BY nm_id::bigint, sale_dt::date, date_from::date, date_to::date, realizationreport_id, supplier
-) d
-  ON COALESCE(a.rr_dt, b.date, c.rr_dt) = d.sale_dt
- AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id) = d.nm_id
-FULL JOIN reports.v_bonus_review_deductions f
-  ON COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt) = f.rr_dt
- AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id) = f.product_id::bigint;
+END AS profit_before_deductions
+FROM reports.detail_finance_reports
+WHERE date_from::date >= '2025-08-25'
+GROUP BY     supplier,
+    realizationreport_id,
+    nm_id,
+    date_from::date,
+    date_to::date,
+rr_dt::date
+ORDER BY supplier, date_from, date_to
