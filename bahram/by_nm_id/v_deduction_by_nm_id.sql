@@ -1,6 +1,6 @@
 -- ОСНОВНОЙ ЗАПРОС: Расчет deduction с разбивкой по nm_id
 -- Делит updsum поровну между всеми товарами в кампании
-
+CREATE OR REPLACE VIEW reports.v_deduction_by_nm_id AS
 WITH adv_campaigns AS (
     -- Получаем уникальные комбинации advertid и nm_id
     SELECT DISTINCT advertid, nm_id, supplier
@@ -73,7 +73,7 @@ deduction_calculation AS (
     LEFT JOIN adv_upd_with_nm awn
         ON u.upd_number::text = awn.updnum::text
     WHERE COALESCE(u.item_name, r.bonus_type_name) = 'Оказание услуг «ВБ.Продвижение»'
-      AND (r.date_from IS NULL OR r.date_from::date >= DATE '2025-09-01')
+      AND (r.date_from IS NULL OR r.date_from::date >= DATE '2025-08-25')
 ),
 nm_id_expanded AS (
     -- Разворачиваем nm_id из строки в отдельные строки
