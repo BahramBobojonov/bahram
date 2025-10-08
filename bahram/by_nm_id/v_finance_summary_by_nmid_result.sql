@@ -86,6 +86,8 @@ AS total_to_transfer,
 (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))) AS vat_amount,
 ((  COALESCE(a.net_retail_amount, 0) - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
  * CAST(:tax_rate AS numeric)) AS tax_to_pay,
+ COALESCE(cp.cost_price_sum, 0) AS cost_price_per_one,
+ (COALESCE(a.quantity_sales, 0) * COALESCE(cp.cost_price_sum, 0)) AS cost_price_sum,
  ((
   COALESCE(a.to_transfer_for_goods::numeric, 0)
 )
@@ -115,7 +117,8 @@ COALESCE(a.deduction_other_total::numeric, 0)
 - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))  -- vat_amount
 - ((COALESCE(a.net_retail_amount, 0) 
      - (COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric))))
-   * CAST(:tax_rate AS numeric)) AS profit_after_all  -- tax_amoun
+   * CAST(:tax_rate AS numeric))
+- (COALESCE(a.quantity_sales, 0) * COALESCE(cp.cost_price_sum, 0)) AS profit_after_all  -- tax_amoun
 FROM reports.mv_detail_finance_reports_v1 a
 FULL JOIN reports.v_storage_fee_by_nmid b
   ON a.rr_dt = b.date
@@ -139,4 +142,10 @@ FULL JOIN (
  AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id) = d.nm_id
 FULL JOIN reports.v_bonus_review_deductions f
   ON COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt) = f.rr_dt
- AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id) = f.product_id::bigint;
+ AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id) = f.product_id::bigint
+ LEFT JOIN products.v_single_cost_price cp
+  ON a.supplier_name = cp.legal_entity
+ AND a.nm_id = cp.nm_id
+
+ 
+ 
