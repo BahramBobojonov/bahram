@@ -7,8 +7,8 @@ SELECT
   COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) AS rr_dt,
   CASE 
     WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
+    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+    WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
   END AS storage_fee_total,
   COALESCE(c.total_acceptance, 0) AS total_acceptance,
@@ -65,8 +65,8 @@ SELECT
 -
 CASE 
     WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
+    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+    WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
 END
 -
@@ -100,8 +100,8 @@ AS total_to_transfer,
 -
 CASE 
     WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total, 0) <> 0 THEN a.storage_fee_total
-    WHEN COALESCE(b.storage_fee_total, 0) <> 0 THEN b.storage_fee_total
+    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+    WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
 END
 -
@@ -123,9 +123,11 @@ FROM reports.mv_detail_finance_reports_v1 a
 FULL JOIN reports.v_storage_fee_by_nmid b
   ON a.rr_dt = b.date
  AND a.nm_id = b.nmid::bigint
+ and a.realizationreport_id = b.realizationreport_id
 FULL JOIN reports.v_acceptance_by_nm_id c
   ON COALESCE(a.rr_dt, b.date) = c.rr_dt
  AND COALESCE(a.nm_id, b.nmid::bigint) = c.nm_id
+ and COALESCE(a.realizationreport_id, b.realizationreport_id) = c.realizationreport_id
 FULL JOIN (
   SELECT 
     nm_id::bigint, 
@@ -140,9 +142,11 @@ FULL JOIN (
 ) d
   ON COALESCE(a.rr_dt, b.date, c.rr_dt) = d.sale_dt
  AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id) = d.nm_id
+ and COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id) = d.realizationreport_id
 FULL JOIN reports.v_bonus_review_deductions f
   ON COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt) = f.rr_dt
  AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id) = f.product_id::bigint
+ and COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id, d.realizationreport_id) = f.realizationreport_id
  LEFT JOIN products.v_single_cost_price cp
   ON a.supplier_name = cp.legal_entity
  AND a.nm_id = cp.nm_id

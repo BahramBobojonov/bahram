@@ -382,7 +382,12 @@ SELECT
             )
         ) <= 5 THEN true
         ELSE false
-    END AS is_equal
+    END AS is_equal,
+    nmid.total_to_transfer_by_nmid,
+    CASE 
+        WHEN ABS(b.total_to_transfer - COALESCE(nmid.total_to_transfer_by_nmid, 0)) <= 5 THEN true
+        ELSE false
+    END AS is_equal_nmid
 FROM base b
 LEFT JOIN documents.upd_items ui
     ON b.realizationreport_id::text = ui.report_number
@@ -398,4 +403,12 @@ LEFT JOIN (
     GROUP BY redemption_number, company
 ) r
     ON b.realizationreport_id::text = r.redemption_number
+LEFT JOIN (
+    SELECT 
+        realizationreport_id,
+        SUM(total_to_transfer) AS total_to_transfer_by_nmid
+    FROM reports.detail_finance_reports_by_nm_id
+    GROUP BY realizationreport_id
+) nmid
+    ON b.realizationreport_id = nmid.realizationreport_id
 ORDER BY b.supplier_name, b.date_from, b.date_to;
