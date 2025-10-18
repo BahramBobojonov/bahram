@@ -2016,7 +2016,7 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
                     except Exception as e:
                         print(f"  ⚠ Не удалось сохранить PDF для дебага: {e}")
         
-        #deleted_count = cleanup_files(company_dir)
+        deleted_count = cleanup_files(company_dir)
         print(f"  ✓ Удалено {deleted_count} файлов и папок")
         print(f"  💾 Освобождено место на диске")
     else:

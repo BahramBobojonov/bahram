@@ -129,15 +129,16 @@ def execute_sql_with_params(sql_query, vat_rate, tax_rate, supplier_name):
         raise
 
 
-def save_to_table(df, table_name, schema='reports', if_exists='append'):
+def save_to_table(df, table_name, schema='reports', if_exists='append', chunksize=1000):
     """
-    Сохраняет DataFrame в таблицу PostgreSQL
+    Сохраняет DataFrame в таблицу PostgreSQL порциями
     
     Args:
         df: DataFrame для сохранения
         table_name: Имя таблицы
         schema: Схема БД (по умолчанию 'reports')
         if_exists: Режим записи ('append', 'replace', 'fail')
+        chunksize: Размер порции для вставки
     """
     try:
         df.to_sql(
@@ -146,7 +147,8 @@ def save_to_table(df, table_name, schema='reports', if_exists='append'):
             schema=schema,
             if_exists=if_exists,
             index=False,
-            method='multi'
+            method='multi',
+            chunksize=chunksize
         )
         logger.info(f"✅ Данные сохранены в {schema}.{table_name}: {len(df)} строк")
     except Exception as e:
@@ -177,15 +179,6 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("ШАГ 1: Выполнение v_finance_summary_by_nmid.sql")
     logger.info("=" * 80)
-    logger.info("\n⚠️ ВАЖНО: Запрос использует фиксированные параметры НДС и налога.")
-    logger.info("⚠️ Для правильной работы нужно добавить колонки vat_rate и tax_rate в исходные данные.")
-    
-    # Добавляем фильтр WHERE к первому SQL запросу
-    sql_with_filter_1 = sql_query_1.replace(
-        "FROM reports.detail_finance_reports",
-        f"FROM reports.detail_finance_reports WHERE supplier IN ({','.join([repr(s) for s in df_rates['Имя Юрлица'].tolist()])})"
-    )
-    
     all_results_1 = []
     for idx, row in df_rates.iterrows():
         supplier_name = row['Имя Юрлица']
@@ -196,8 +189,8 @@ def main():
         
         # Добавляем фильтр по supplier к запросу (после WHERE, до GROUP BY)
         sql_filtered = sql_query_1.replace(
-            "WHERE date_from::date >= '2025-08-25'",
-            f"WHERE date_from::date >= '2025-08-25' AND supplier = '{supplier_name}'"
+            "FROM reports.detail_finance_reports\nWHERE",
+            f"FROM reports.detail_finance_reports\nWHERE supplier = '{supplier_name}' AND"
         )
         
         try:
@@ -237,7 +230,17 @@ def main():
     logger.info("ШАГ 2: Выполнение v_finance_summary_by_nmid_result.sql")
     logger.info("=" * 80)
     
-    all_results_2 = []
+    # Очищаем таблицу один раз в начале
+    logger.info("\n💾 Очистка таблицы reports.detail_finance_reports_by_nm_id...")
+    try:
+        with ENGINE.connect() as conn:
+            conn.execute(text("TRUNCATE TABLE reports.detail_finance_reports_by_nm_id"))
+            conn.commit()
+        logger.info("✅ Таблица очищена через TRUNCATE")
+    except Exception as e:
+        logger.warning(f"⚠ Ошибка при очистке таблицы: {e}")
+    
+    total_rows_saved = 0
     for idx, row in df_rates.iterrows():
         supplier_name = row['Имя Юрлица']
         vat_rate = row['НДС']
@@ -252,8 +255,18 @@ def main():
             df_result = execute_sql_with_params(sql_filtered, vat_rate, tax_rate, supplier_name)
             
             if len(df_result) > 0:
-                all_results_2.append(df_result)
-                logger.info(f"  ✓ Добавлено {len(df_result)} строк для {supplier_name}")
+                # Конвертируем все числовые колонки в правильные типы
+                numeric_columns = [col for col in df_result.columns if col not in ['supplier_name', 'supplier', 'realizationreport_id', 'date_from', 'date_to', 'rr_dt']]
+                for col in numeric_columns:
+                    try:
+                        df_result[col] = pd.to_numeric(df_result[col], errors='coerce')
+                    except:
+                        pass
+                
+                # Сохраняем данные сразу порциями
+                save_to_table(df_result, 'detail_finance_reports_by_nm_id', schema='reports', if_exists='append', chunksize=500)
+                total_rows_saved += len(df_result)
+                logger.info(f"  ✓ Сохранено {len(df_result)} строк для {supplier_name}")
             else:
                 logger.warning(f"  ⚠ Нет данных для {supplier_name}")
                 
@@ -261,24 +274,10 @@ def main():
             logger.error(f"  ✗ Ошибка для {supplier_name}: {e}")
             continue
     
-    # Сохраняем результаты второго запроса
-    if all_results_2:
-        logger.info(f"\n💾 Сохранение результатов в reports.detail_finance_reports_by_nm_id...")
-        df_final_2 = pd.concat(all_results_2, ignore_index=True)
-        
-        # Конвертируем все числовые колонки в правильные типы
-        numeric_columns = [col for col in df_final_2.columns if col not in ['supplier_name', 'supplier', 'realizationreport_id', 'date_from', 'date_to', 'rr_dt']]
-        for col in numeric_columns:
-            try:
-                df_final_2[col] = pd.to_numeric(df_final_2[col], errors='coerce')
-            except:
-                pass
-        
-        # Очищаем таблицу перед записью
-        save_to_table(df_final_2, 'detail_finance_reports_by_nm_id', schema='reports', if_exists='replace')
-        logger.info(f"✅ Всего сохранено {len(df_final_2)} строк")
+    if total_rows_saved > 0:
+        logger.info(f"\n✅ Всего сохранено {total_rows_saved} строк в detail_finance_reports_by_nm_id")
     else:
-        logger.warning("⚠ Нет данных для сохранения на шаге 2")
+        logger.warning("\n⚠ Нет данных для сохранения на шаге 2")
     
     logger.info("\n" + "=" * 80)
     logger.info("✅ СКРИПТ ЗАВЕРШЕН УСПЕШНО")

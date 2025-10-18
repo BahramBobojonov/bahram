@@ -359,7 +359,7 @@ CASE
     ELSE 0
 END AS profit_before_deductions
 FROM reports.detail_finance_reports
-WHERE date_from::date >= '2025-08-25'
+WHERE date_from::date >= '2025-03-01'
 GROUP BY     supplier,
     realizationreport_id,
     nm_id,

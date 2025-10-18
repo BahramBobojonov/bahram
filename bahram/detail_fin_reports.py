@@ -29,7 +29,7 @@ df_investors = df_investors[(df_investors['API ключ'] != '') & (df_investors
 dict_api = dict(zip(df_investors['API ключ'], df_investors['Имя Юрлица']))
 
 # Configurable dates - for testing, use small period; for full, '2024-01-29'
-start_date = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')  # Last 14 days as requested
+start_date = (datetime.now() - timedelta(days=628)).strftime('%Y-%m-%d')  # Last 14 days as requested
 end_date = datetime.today().strftime('%Y-%m-%d')
 
 def fetch_report_chunk(api_key, date_from, date_to, rrdid):
@@ -172,10 +172,39 @@ def ensure_table_columns(engine, sample_df, schema, table_name):
                 print(f"Error adding column {col}: {e}")
         print(f"Added new columns to {full_table}: {new_cols}")
 
+def count_supplier_rows_in_db(engine, schema, table_name, supplier, start_date, end_date):
+    """
+    Подсчитывает количество уникальных строк по rrd_id для поставщика в БД за указанный период.
+    """
+    full_table = f"{schema}.{table_name}"
+    count_query = text(f"""
+        SELECT COUNT(DISTINCT rrd_id) as unique_count,
+               COUNT(*) as total_count
+        FROM {full_table}
+        WHERE supplier = :supplier
+          AND rrd_id IS NOT NULL
+          AND NULLIF(btrim(rrd_id::text), '') IS NOT NULL
+          AND date_trunc('day', CAST(rr_dt AS timestamp)) >= CAST(:start_date AS date)
+          AND date_trunc('day', CAST(rr_dt AS timestamp)) <= CAST(:end_date AS date)
+    """)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(count_query, {
+                'supplier': supplier,
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            row = result.fetchone()
+            return row[0], row[1]  # unique_count, total_count
+    except Exception as e:
+        print(f"Error counting rows for {supplier}: {e}")
+        return 0, 0
+
 def deduplicate_supplier_by_rrd_id(engine, schema, table_name, supplier):
     """
     Финальная дедупликация: для заданного поставщика удаляем дубли по rrd_id,
     оставляя запись с максимальным update_time. Пустые/NULL rrd_id игнорируются.
+    Возвращает количество удаленных строк.
     """
     full_table = f"{schema}.{table_name}"
     # Удаляем все строки, которые не первые в разбиении по (supplier, rrd_id)
@@ -200,11 +229,14 @@ def deduplicate_supplier_by_rrd_id(engine, schema, table_name, supplier):
     )
     try:
         with engine.connect() as conn:
-            conn.execute(delete_sql, { 'supplier': supplier })
+            result = conn.execute(delete_sql, { 'supplier': supplier })
+            deleted_count = result.rowcount
             conn.commit()
-        print(f"Deduplicated by rrd_id at end for {supplier}")
+        print(f"Deduplicated by rrd_id for {supplier}: удалено {deleted_count} дублей")
+        return deleted_count
     except Exception as e:
         print(f"Error in final dedup by rrd_id for {supplier}: {e}")
+        return 0
 
 def save_chunk_to_db(df_chunk, supplier, engine, schema, table_name):
     """
@@ -250,10 +282,13 @@ def get_detail_fin_report_all_suppliers(dict_api, start_date, end_date):
         return
     
     for api_key, supplier in dict_api.items():
+        print(f"\n{'='*80}")
         print(f"Processing supplier: {supplier}")
+        print(f"{'='*80}")
         rrdid = 0
         sample_df = None
-        total_rows = 0
+        total_rows_from_api = 0
+        unique_rrd_ids_from_api = set()
         
         # First, try to fetch a sample chunk to get columns
         try:
@@ -268,7 +303,11 @@ def get_detail_fin_report_all_suppliers(dict_api, start_date, end_date):
         sample_df = first_df
         ensure_table_columns(engine, sample_df, schema, table_name)
         save_chunk_to_db(first_df, supplier, engine, schema, table_name)
-        total_rows += len(first_df)
+        
+        # Собираем статистику по API данным
+        total_rows_from_api += len(first_df)
+        if 'rrd_id' in first_df.columns:
+            unique_rrd_ids_from_api.update(first_df['rrd_id'].dropna().astype(str).str.strip().tolist())
         
         # Continue with remaining chunks
         rrdid = next_rrdid
@@ -281,16 +320,49 @@ def get_detail_fin_report_all_suppliers(dict_api, start_date, end_date):
             if df_chunk is None or df_chunk.empty:
                 break
             save_chunk_to_db(df_chunk, supplier, engine, schema, table_name)
-            total_rows += len(df_chunk)
+            
+            # Собираем статистику
+            total_rows_from_api += len(df_chunk)
+            if 'rrd_id' in df_chunk.columns:
+                unique_rrd_ids_from_api.update(df_chunk['rrd_id'].dropna().astype(str).str.strip().tolist())
+            
             rrdid = next_rrdid
             time.sleep(RATE_LIMIT_SECONDS)  # Rate limit
         
         # Финальная дедупликация после вставки всех чанков поставщика
-        deduplicate_supplier_by_rrd_id(engine, schema, table_name, supplier)
+        deleted_count = deduplicate_supplier_by_rrd_id(engine, schema, table_name, supplier)
         
-        print(f"Completed {supplier}: {total_rows} total rows")
+        # Проверка: считаем строки в БД после дедупликации
+        unique_in_db, total_in_db = count_supplier_rows_in_db(engine, schema, table_name, supplier, start_date, end_date)
+        
+        # Выводим отчет
+        print(f"\n{'-'*80}")
+        print(f"ОТЧЕТ ДЛЯ ПОСТАВЩИКА: {supplier}")
+        print(f"{'-'*80}")
+        print(f"📊 Данные полученные из API:")
+        print(f"   • Всего строк получено: {total_rows_from_api}")
+        print(f"   • Уникальных rrd_id: {len(unique_rrd_ids_from_api)}")
+        print(f"\n💾 Данные в БД после дедупликации:")
+        print(f"   • Всего строк в БД: {total_in_db}")
+        print(f"   • Уникальных rrd_id в БД: {unique_in_db}")
+        print(f"   • Удалено дублей: {deleted_count}")
+        print(f"\n✅ Проверка целостности:")
+        
+        # Расчет разницы
+        diff_unique = len(unique_rrd_ids_from_api) - unique_in_db
+        match_status = "✅ СОВПАДАЕТ" if diff_unique == 0 else f"⚠️ РАСХОЖДЕНИЕ: {abs(diff_unique)} записей"
+        
+        print(f"   • Уникальные rrd_id (API vs БД): {match_status}")
+        
+        if diff_unique != 0:
+            print(f"   ⚠️ ВНИМАНИЕ: Количество уникальных записей не совпадает!")
+            print(f"      API: {len(unique_rrd_ids_from_api)} | БД: {unique_in_db} | Разница: {diff_unique}")
+        
+        print(f"{'-'*80}\n")
     
+    print("\n" + "="*80)
     print("All suppliers processed.")
+    print("="*80)
 
 if __name__ == "__main__":
     get_detail_fin_report_all_suppliers(dict_api, start_date, end_date)
