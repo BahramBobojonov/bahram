@@ -28,8 +28,8 @@ df_investors = pd.DataFrame(worksheet.get_all_records())
 df_investors = df_investors[(df_investors['API ключ'] != '')&(df_investors['API ключ'] != None)]
 
 
-# Период для получения данных (45 дней назад до сегодня)
-start_date = (datetime.today() - timedelta(days=45)).strftime('%Y-%m-%d')
+# Период для получения данных (с 1 марта 2025 года до сегодня)
+start_date = datetime(2025, 3, 1).strftime('%Y-%m-%d')
 end_date = datetime.today().strftime('%Y-%m-%d')
 
 
@@ -88,15 +88,16 @@ def ensure_table_columns(engine, schema, table_name, df):
                     raise
 
 
-def make_request_with_retry(url, headers, params=None, max_retries=5, initial_delay=5):
+def make_request_with_retry(url, headers, params=None, max_retries=15, initial_delay=10):
     """
     Выполняет запрос с повторными попытками при ошибках 429 и 5xx.
+    Увеличено количество попыток и время задержек для надежности.
     
     :param url: URL для запроса
     :param headers: Заголовки запроса
     :param params: Параметры запроса
-    :param max_retries: Максимальное количество повторных попыток
-    :param initial_delay: Начальная задержка в секундах
+    :param max_retries: Максимальное количество повторных попыток (по умолчанию 15)
+    :param initial_delay: Начальная задержка в секундах (по умолчанию 10)
     :return: Response объект или None при неудаче
     """
     for attempt in range(max_retries):
@@ -105,27 +106,29 @@ def make_request_with_retry(url, headers, params=None, max_retries=5, initial_de
             
             # Успешный ответ
             if response.status_code == 200:
+                logger.info(f"Успешный запрос после {attempt + 1} попыток")
                 return response
             
             # Ошибка 429 (Too Many Requests) - нужно повторить с задержкой
             if response.status_code == 429:
-                # Экспоненциальная задержка: 5, 10, 20, 40, 80 секунд
-                delay = initial_delay * (2 ** attempt)
+                # Увеличенная экспоненциальная задержка: 10, 20, 40, 80, 160, 320, 640, 1280 сек
+                delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
                 logger.warning(f"Ошибка 429 (Too Many Requests). Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
                 time.sleep(delay)
                 continue
             
             # Ошибки 5xx (серверные ошибки) - можно повторить
             if 500 <= response.status_code < 600:
-                delay = initial_delay * (4 ** attempt)
+                delay = min(initial_delay * (3 ** attempt), 1800)  # Максимум 30 минут
                 logger.warning(f"Серверная ошибка {response.status_code}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
                 time.sleep(delay)
                 continue
             # Другие ошибки (401, 403, 404 и т.д.) - не повторяем
+            logger.error(f"Ошибка {response.status_code} - не повторяем")
             return response
             
         except requests.exceptions.RequestException as e:
-            delay = initial_delay * (2 ** attempt)
+            delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
             logger.error(f"Ошибка сети при запросе: {e}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
             if attempt < max_retries - 1:
                 time.sleep(delay)
@@ -137,7 +140,7 @@ def make_request_with_retry(url, headers, params=None, max_retries=5, initial_de
     return None
 
 
-def check_task_status(api_key, task_id, max_attempts=20, delay=10):
+def check_task_status(api_key, task_id, max_attempts=50, delay=15):
     """
     Проверяет статус задачи через polling.
     
@@ -152,7 +155,7 @@ def check_task_status(api_key, task_id, max_attempts=20, delay=10):
     
     for attempt in range(max_attempts):
         try:
-            response = make_request_with_retry(status_url, headers, max_retries=3, initial_delay=3)
+            response = make_request_with_retry(status_url, headers, max_retries=10, initial_delay=5)
             
             if response and response.status_code == 200:
                 status_data = response.json()
@@ -199,7 +202,7 @@ def get_paid_storage_data_for_supplier(ip, api_key, start_date, end_date):
             'dateTo': end_date
         }
 
-        response = make_request_with_retry(url, headers, params=params, max_retries=5, initial_delay=5)
+        response = make_request_with_retry(url, headers, params=params, max_retries=15, initial_delay=10)
 
         if not response or response.status_code != 200:
             logger.error(f"Ошибка создания задачи: {response.status_code if response else 'Нет ответа'} для {ip}")
@@ -211,7 +214,7 @@ def get_paid_storage_data_for_supplier(ip, api_key, start_date, end_date):
         logger.info(f"Создана задача {task_id} для {ip} за период {start_date} - {end_date}")
         
         # Шаг 2: Проверка статуса задачи
-        if not check_task_status(api_key, task_id, max_attempts=30, delay=5):
+        if not check_task_status(api_key, task_id, max_attempts=50, delay=15):
             logger.error(f"Задача {task_id} не завершилась успешно для {ip}")
             return None
         
@@ -219,7 +222,7 @@ def get_paid_storage_data_for_supplier(ip, api_key, start_date, end_date):
         download_url = f"https://seller-analytics-api.wildberries.ru/api/v1/paid_storage/tasks/{task_id}/download"
         headers = {'Authorization': api_key}
         
-        response_data = make_request_with_retry(download_url, headers, max_retries=5, initial_delay=5)
+        response_data = make_request_with_retry(download_url, headers, max_retries=15, initial_delay=10)
 
         if not response_data or response_data.status_code != 200:
             logger.error(f"Ошибка загрузки данных: {response_data.status_code if response_data else 'Нет ответа'} для {ip}")
@@ -252,6 +255,7 @@ def get_paid_storage_data(start_date, end_date):
     """
     Получает данные о платном хранении через API Wildberries с циклами по 8 дней.
     Оптимизированная версия с проверкой статуса задачи и динамическим управлением схемой БД.
+    Пропускает ИП с ошибками авторизации после первой неудачной попытки.
     
     :param start_date: Дата начала периода
     :param end_date: Дата окончания периода
@@ -259,6 +263,7 @@ def get_paid_storage_data(start_date, end_date):
     """
     success_count = 0
     error_count = 0
+    auth_error_count = 0
     
     # Преобразуем строки в datetime объекты
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -275,11 +280,12 @@ def get_paid_storage_data(start_date, end_date):
         logger.info(f"Обработка данных для {ip}")
         
         all_dataframes = []
+        auth_error_occurred = False
         
         # Разбиваем период на циклы по 8 дней
         current_start = start_dt
         cycle_count = 0
-        while current_start <= end_dt:
+        while current_start <= end_dt and not auth_error_occurred:
             # Определяем конец текущего цикла (максимум 8 дней)
             current_end = min(current_start + timedelta(days=7), end_dt)
             
@@ -293,24 +299,32 @@ def get_paid_storage_data(start_date, end_date):
             
             if df_period is not None:
                 all_dataframes.append(df_period)
+            else:
+                # Проверяем, была ли это ошибка авторизации
+                # Если в первом цикле нет данных и нет ответа - скорее всего ошибка авторизации
+                if cycle_count == 0:
+                    logger.warning(f"Первый запрос для {ip} не дал данных. Возможна ошибка авторизации. Пропускаем остальные периоды.")
+                    auth_error_occurred = True
+                    auth_error_count += 1
+                    break
             
             # Переходим к следующему периоду
             current_start = current_end + timedelta(days=1)
             cycle_count += 1
             
-            # Адаптивная пауза с учетом burst лимита API (5 запросов быстро, потом 60 сек)
-            # Лимит API: 1 запрос/минуту, всплеск 5 запросов
-            if current_start <= end_dt:  # Не ждем после последнего цикла
-                if cycle_count % 5 == 0:
-                    # После каждых 5 циклов - длинная пауза для восстановления burst лимита
-                    logger.info(f"Пауза 65 секунд для соблюдения лимитов API (цикл {cycle_count})")
-                    time.sleep(65)
+            # Адаптивная пауза с учетом burst лимита API (3 запроса быстро, потом 120 сек)
+            # Лимит API: 1 запрос/минуту, всплеск 5 запросов - увеличиваем паузы
+            if current_start <= end_dt and not auth_error_occurred:  # Не ждем после последнего цикла
+                if cycle_count % 3 == 0:
+                    # После каждых 3 циклов - длинная пауза для восстановления burst лимита
+                    logger.info(f"Пауза 120 секунд для соблюдения лимитов API (цикл {cycle_count})")
+                    time.sleep(120)
                 else:
-                    # Между циклами внутри burst - короткая пауза
-                    time.sleep(5)
+                    # Между циклами внутри burst - средняя пауза
+                    time.sleep(15)
         
-        # Объединяем все данные за все периоды
-        if all_dataframes:
+        # Объединяем все данные за все периоды (только если не было ошибки авторизации)
+        if all_dataframes and not auth_error_occurred:
             try:
                 df_combined = pd.concat(all_dataframes, ignore_index=True)
                 
@@ -326,9 +340,16 @@ def get_paid_storage_data(start_date, end_date):
             except Exception as e:
                 logger.error(f"Ошибка при объединении данных для {ip}: {e}", exc_info=True)
                 error_count += 1
+        elif auth_error_occurred:
+            logger.warning(f"Пропущен {ip} из-за ошибки авторизации")
         else:
             logger.warning(f"Не получено данных для {ip} за весь период")
             error_count += 1
+        
+        # Пауза между обработкой разных ИП для снижения нагрузки на API
+        if idx < len(df_investors) - 1:  # Не ждем после последнего ИП
+            logger.info(f"Пауза 30 секунд перед обработкой следующего ИП...")
+            time.sleep(30)
     
     # Очистка старых записей после успешной загрузки
     if success_count > 0:
@@ -336,8 +357,8 @@ def get_paid_storage_data(start_date, end_date):
         delete_old_paid_storage_records(engine)
         logger.info("✅ Дедупликация завершена успешно")
     
-    logger.info(f"Обработка завершена. Успешно: {success_count}, Ошибок: {error_count}")
-    return f"Данные успешно обновлены. Успешно: {success_count}, Ошибок: {error_count}"
+    logger.info(f"Обработка завершена. Успешно: {success_count}, Ошибок: {error_count}, Ошибок авторизации: {auth_error_count}")
+    return f"Данные успешно обновлены. Успешно: {success_count}, Ошибок: {error_count}, Ошибок авторизации: {auth_error_count}"
 
 
 def save_raw_api_response_to_excel(start_date, end_date, supplier_name="Баах Р"):
@@ -377,7 +398,7 @@ def save_raw_api_response_to_excel(start_date, end_date, supplier_name="Баах
             'dateTo': end_date
         }
 
-        response = make_request_with_retry(url, headers, params=params, max_retries=5, initial_delay=5)
+        response = make_request_with_retry(url, headers, params=params, max_retries=15, initial_delay=10)
 
         if not response or response.status_code != 200:
             logger.error(f"Ошибка создания задачи: {response.status_code if response else 'Нет ответа'} для {ip}")
@@ -389,7 +410,7 @@ def save_raw_api_response_to_excel(start_date, end_date, supplier_name="Баах
         logger.info(f"Создана задача {task_id} для {ip}")
         
         # Шаг 2: Проверка статуса задачи
-        if not check_task_status(api_key, task_id, max_attempts=30, delay=5):
+        if not check_task_status(api_key, task_id, max_attempts=50, delay=15):
             logger.error(f"Задача {task_id} не завершилась успешно для {ip}")
             return None
         
@@ -397,7 +418,7 @@ def save_raw_api_response_to_excel(start_date, end_date, supplier_name="Баах
         download_url = f"https://seller-analytics-api.wildberries.ru/api/v1/paid_storage/tasks/{task_id}/download"
         headers = {'Authorization': api_key}
         
-        response_data = make_request_with_retry(download_url, headers, max_retries=5, initial_delay=5)
+        response_data = make_request_with_retry(download_url, headers, max_retries=15, initial_delay=10)
 
         if not response_data or response_data.status_code != 200:
             logger.error(f"Ошибка загрузки данных: {response_data.status_code if response_data else 'Нет ответа'} для {ip}")
@@ -509,7 +530,41 @@ def delete_old_paid_storage_records(engine):
         raise
 
 
+def generate_report_from_march_2025():
+    """
+    Генерирует отчет о платном хранении с 1 марта 2025 года до текущей даты.
+    Использует циклы по 8 дней для соблюдения лимитов API.
+    """
+    # Устанавливаем дату начала - 1 марта 2025 года
+    march_1_2025 = datetime(2025, 3, 1)
+    today = datetime.today()
+    
+    # Проверяем, что 1 марта 2025 еще не наступило
+    if today < march_1_2025:
+        logger.warning(f"1 марта 2025 года еще не наступило. Текущая дата: {today.strftime('%Y-%m-%d')}")
+        return "Отчет не может быть сгенерирован - 1 марта 2025 года еще не наступило"
+    
+    start_date = march_1_2025.strftime('%Y-%m-%d')
+    end_date = today.strftime('%Y-%m-%d')
+    
+    logger.info("=" * 80)
+    logger.info(f"Генерация отчета о платном хранении с 1 марта 2025 года")
+    logger.info(f"Период: {start_date} - {end_date}")
+    logger.info(f"Общее количество дней: {(today - march_1_2025).days + 1}")
+    logger.info("=" * 80)
+    
+    try:
+        result = get_paid_storage_data(start_date, end_date)
+        logger.info(result)
+        logger.info("Отчет с 1 марта 2025 года завершен успешно")
+        return result
+    except Exception as e:
+        logger.error(f"Критическая ошибка при генерации отчета с 1 марта 2025: {e}", exc_info=True)
+        raise
+
+
 if __name__ == "__main__":
+    # Запуск обычного обновления (45 дней назад до сегодня)
     logger.info("=" * 80)
     logger.info(f"Запуск обновления данных о платном хранении")
     logger.info(f"Период: {start_date} - {end_date}")

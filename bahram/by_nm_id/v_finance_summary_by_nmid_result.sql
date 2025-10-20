@@ -56,6 +56,7 @@ SELECT
   COALESCE(pvz.ppvz_reward, 0) AS ppvz_reward,
   COALESCE(fee.acquiring_fee, 0) AS acquiring_fee,
   COALESCE(logistic.rebill_logistic_cost, 0) AS rebill_logistic_cost,
+  COALESCE(cashback.cashback_discount, 0) AS cashback_discount,
   (
   COALESCE(a.to_transfer_for_goods::numeric, 0)
 )
@@ -171,6 +172,13 @@ FULL JOIN reports.v_bonus_review_deductions f
  AND COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) = logistic.rr_dt::date
  AND COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) = logistic.date_from::date
  AND COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) = logistic.date_to::date
+  LEFT JOIN reports.vw_pvz_cashback_discount cashback
+  ON COALESCE(a.supplier_name, b.supplier, c.supplier, d.supplier, f.supplier) = cashback.supplier
+ AND COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id, d.realizationreport_id, f.realizationreport_id) = cashback.realizationreport_id
+ AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint) = cashback.nm_id
+ AND COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) = cashback.rr_dt::date
+ AND COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) = cashback.date_from::date
+ AND COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) = cashback.date_to::date
  LEFT JOIN products.v_single_cost_price cp
   ON a.supplier_name = cp.legal_entity
  AND a.nm_id = cp.nm_id

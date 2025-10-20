@@ -8,7 +8,15 @@ import time
 import gspread
 import os
 import json
+import logging
 from typing import List, Dict, Any, Optional
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # === PostgreSQL setup ===
 engine = create_engine('postgresql://bahram:Dadajonim99@94.103.84.245:5432/wb_baah')
@@ -23,6 +31,58 @@ df_keys = df_keys[df_keys['API ключ'].notnull() & (df_keys['API ключ'] !
 dict_api = dict(zip(df_keys['API ключ'], df_keys['Имя Юрлица']))
 
 print(f"Найдено API ключей: {len(dict_api)}")
+
+def make_request_with_retry(url, headers, params=None, max_retries=15, initial_delay=10):
+    """
+    Выполняет запрос с повторными попытками при ошибках 429 и 5xx.
+    Увеличено количество попыток и время задержек для надежности.
+    
+    :param url: URL для запроса
+    :param headers: Заголовки запроса
+    :param params: Параметры запроса
+    :param max_retries: Максимальное количество повторных попыток (по умолчанию 15)
+    :param initial_delay: Начальная задержка в секундах (по умолчанию 10)
+    :return: Response объект или None при неудаче
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=90)
+            
+            # Успешный ответ
+            if response.status_code == 200:
+                logger.info(f"Успешный запрос после {attempt + 1} попыток")
+                return response
+            
+            # Ошибка 429 (Too Many Requests) - нужно повторить с задержкой
+            if response.status_code == 429:
+                # Увеличенная экспоненциальная задержка: 10, 20, 40, 80, 160, 320, 640, 1280 сек
+                delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
+                logger.warning(f"⚠️ Ошибка 429 (Too Many Requests). Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+                time.sleep(delay)
+                continue
+            
+            # Ошибки 5xx (серверные ошибки) - можно повторить
+            if 500 <= response.status_code < 600:
+                delay = min(initial_delay * (3 ** attempt), 1800)  # Максимум 30 минут
+                logger.warning(f"Серверная ошибка {response.status_code}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+                time.sleep(delay)
+                continue
+            
+            # Другие ошибки (401, 403, 404 и т.д.) - не повторяем
+            logger.error(f"Ошибка {response.status_code} - не повторяем")
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
+            logger.error(f"Ошибка сети при запросе: {e}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+            else:
+                logger.error(f"Исчерпаны все попытки запроса к {url}")
+                return None
+    
+    logger.error(f"Не удалось выполнить запрос после {max_retries} попыток")
+    return None
 
 def create_claims_table():
     """Создает таблицу для хранения заявок на возврат"""
@@ -105,14 +165,14 @@ def get_claims(api_key: str, company_name: str, is_archive: bool = False,
     
     try:
         print(f"Запрос заявок для {company_name} (архив: {is_archive}, offset: {offset})")
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response = make_request_with_retry(url, headers, params, max_retries=15, initial_delay=10)
         
-        if response.status_code == 200:
+        if response and response.status_code == 200:
             data = response.json()
             print(f"✓ Получено {len(data.get('claims', []))} заявок для {company_name}")
             return data
         else:
-            print(f"✗ Ошибка API для {company_name}: {response.status_code} - {response.text}")
+            print(f"✗ Ошибка API для {company_name}: {response.status_code if response else 'Нет ответа'} - {response.text if response else 'Нет ответа'}")
             return None
             
     except Exception as e:
@@ -300,8 +360,15 @@ def get_all_claims_for_company(api_key: str, company_name: str, is_archive: bool
         
         offset += limit
         
-        # Пауза между запросами для соблюдения лимитов API
-        time.sleep(3)
+        # Адаптивная пауза с учетом burst лимита API (3 запроса быстро, потом 120 сек)
+        # Лимит API: 1 запрос/минуту, всплеск 5 запросов - увеличиваем паузы
+        if offset % (3 * limit) == 0:
+            # После каждых 3 циклов - длинная пауза для восстановления burst лимита
+            print(f"Пауза 120 секунд для соблюдения лимитов API (offset: {offset})")
+            time.sleep(120)
+        else:
+            # Между циклами внутри burst - средняя пауза
+            time.sleep(15)
     
     if all_claims:
         # Обрабатываем и загружаем данные
@@ -339,29 +406,64 @@ def get_claims_for_period(api_key: str, company_name: str, start_date: datetime,
             # Получаем заявки на рассмотрении
             get_all_claims_for_company(api_key, company_name, is_archive=False)
             
-            # Пауза между запросами
-            time.sleep(3)
+            # Адаптивная пауза между запросами
+            time.sleep(15)
             
             # Получаем заявки в архиве
             get_all_claims_for_company(api_key, company_name, is_archive=True)
             
-            # Пауза между периодами
-            time.sleep(3)
+            # Адаптивная пауза между периодами
+            if i % 3 == 0:
+                # После каждых 3 периодов - длинная пауза для восстановления burst лимита
+                print(f"Пауза 120 секунд для соблюдения лимитов API (период {i})")
+                time.sleep(120)
+            else:
+                # Между периодами внутри burst - средняя пауза
+                time.sleep(15)
             
         except Exception as e:
             print(f"✗ Ошибка в периоде {i} для {company_name}: {e}")
             continue
 
-def main():
-    """Основная функция для получения всех заявок за последние 14 дней"""
-    print("Начинаем получение заявок на возврат за последние 14 дней...")
+def parse_date(date_string: str) -> datetime:
+    """
+    Парсит дату из строки в формате YYYY-MM-DD
     
+    Args:
+        date_string: Строка с датой в формате YYYY-MM-DD
+    
+    Returns:
+        Объект datetime
+    """
+    try:
+        return datetime.strptime(date_string, '%Y-%m-%d')
+    except ValueError:
+        raise ValueError(f"Неверный формат даты: {date_string}. Используйте формат YYYY-MM-DD")
+
+def main(start_date_str: str = None):
+    """
+    Основная функция для получения заявок
+    
+    Args:
+        start_date_str: Начальная дата в формате YYYY-MM-DD (опционально)
+    """
     # Создаем таблицу если не существует
     create_claims_table()
     
-    # Определяем период - последние 14 дней
+    # Определяем период
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=14)
+    
+    if start_date_str:
+        try:
+            start_date = parse_date(start_date_str)
+            print(f"Начинаем получение заявок на возврат с {start_date.strftime('%Y-%m-%d')}...")
+        except ValueError as e:
+            print(f"Ошибка в дате: {e}")
+            return
+    else:
+        # По умолчанию - последние 14 дней
+        start_date = end_date - timedelta(days=14)
+        print("Начинаем получение заявок на возврат за последние 14 дней...")
     
     print(f"Период получения данных: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
     
@@ -371,7 +473,7 @@ def main():
             get_claims_for_period(api_key, company_name, start_date, end_date)
             
             # Пауза между компаниями
-            time.sleep(5)
+            time.sleep(30)
             
         except Exception as e:
             print(f"✗ Ошибка при обработке {company_name}: {e}")
@@ -398,7 +500,7 @@ def main_extended():
             get_claims_for_period(api_key, company_name, start_date, end_date)
             
             # Пауза между компаниями
-            time.sleep(10)
+            time.sleep(30)
             
         except Exception as e:
             print(f"✗ Ошибка при обработке {company_name}: {e}")
@@ -425,13 +527,45 @@ def main_from_2024():
             get_claims_for_period(api_key, company_name, start_date, end_date)
             
             # Пауза между компаниями
-            time.sleep(10)
+            time.sleep(30)
             
         except Exception as e:
             print(f"✗ Ошибка при обработке {company_name}: {e}")
             continue
     
     print("\n✓ Получение заявок с 2024 года завершено!")
+
+def main_from_march_2025():
+    """Функция для получения заявок с 1 марта 2025 года"""
+    print("Начинаем получение заявок на возврат с 1 марта 2025 года...")
+    
+    # Создаем таблицу если не существует
+    create_claims_table()
+    
+    # Определяем период - с 1 марта 2025 года до сегодня
+    start_date = datetime(2025, 3, 1)
+    end_date = datetime.now()
+    
+    # Проверяем, что 1 марта 2025 еще не наступило
+    if end_date < start_date:
+        print(f"1 марта 2025 года еще не наступило. Текущая дата: {end_date.strftime('%Y-%m-%d')}")
+        return "Отчет не может быть сгенерирован - 1 марта 2025 года еще не наступило"
+    
+    print(f"Период получения данных: {start_date.strftime('%Y-%m-%d')} - {end_date.strftime('%Y-%m-%d')}")
+    
+    # Получаем заявки для каждого API ключа
+    for api_key, company_name in dict_api.items():
+        try:
+            get_claims_for_period(api_key, company_name, start_date, end_date)
+            
+            # Пауза между компаниями
+            time.sleep(30)
+            
+        except Exception as e:
+            print(f"✗ Ошибка при обработке {company_name}: {e}")
+            continue
+    
+    print("\n✓ Получение заявок с 1 марта 2025 года завершено!")
 
 if __name__ == "__main__":
     import sys
@@ -444,14 +578,34 @@ if __name__ == "__main__":
         elif sys.argv[1] == "2024":
             print("Запуск с 1 января 2024 года")
             main_from_2024()
+        elif sys.argv[1] == "2025":
+            print("Запуск с 1 марта 2025 года")
+            main_from_march_2025()
+        elif sys.argv[1] == "--start-date" and len(sys.argv) > 2:
+            # Новый режим с указанием даты начала
+            start_date = sys.argv[2]
+            print(f"Запуск с указанной датой начала: {start_date}")
+            main(start_date)
         else:
             print("Неизвестный аргумент. Доступные варианты:")
-            print("  python get_claims.py          - стандартный режим (14 дней)")
-            print("  python get_claims.py extended - расширенный режим (60 дней)")
-            print("  python get_claims.py 2024     - с 1 января 2024 года")
+            print("  python get_claims.py                    - стандартный режим (14 дней)")
+            print("  python get_claims.py --start-date YYYY-MM-DD - с указанной даты")
+            print("  python get_claims.py extended           - расширенный режим (60 дней)")
+            print("  python get_claims.py 2024               - с 1 января 2024 года")
+            print("  python get_claims.py 2025               - с 1 марта 2025 года")
+            print("")
+            print("Примеры:")
+            print("  python get_claims.py --start-date 2025-03-01")
+            print("  python get_claims.py --start-date 2024-01-01")
     else:
         print("Запуск в стандартном режиме (14 дней)")
         print("Доступные режимы:")
-        print("  python get_claims.py extended - расширенный режим (60 дней)")
-        print("  python get_claims.py 2024     - с 1 января 2024 года")
+        print("  python get_claims.py --start-date YYYY-MM-DD - с указанной даты")
+        print("  python get_claims.py extended               - расширенный режим (60 дней)")
+        print("  python get_claims.py 2024                   - с 1 января 2024 года")
+        print("  python get_claims.py 2025                   - с 1 марта 2025 года")
+        print("")
+        print("Примеры:")
+        print("  python get_claims.py --start-date 2025-03-01")
+        print("  python get_claims.py --start-date 2024-01-01")
         main()

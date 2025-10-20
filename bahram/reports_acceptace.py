@@ -28,7 +28,8 @@ df_investors = pd.DataFrame(worksheet.get_all_records())
 df_investors = df_investors[(df_investors['API ключ'] != '')&(df_investors['API ключ'] != None)]
 dict_api = dict(zip(df_investors['API ключ'], df_investors['Имя Юрлица']))
 
-start_date = (datetime.today() - timedelta(days=45)).strftime('%Y-%m-%d')
+# Период для получения данных (с 1 марта 2025 года до сегодня)
+start_date = datetime(2025, 3, 1).strftime('%Y-%m-%d')
 end_date = datetime.today().strftime('%Y-%m-%d')
 
 
@@ -87,15 +88,16 @@ def ensure_table_columns(engine, schema, table_name, df):
                     raise
 
 
-def make_request_with_retry(url, headers, params=None, max_retries=5, initial_delay=8):
+def make_request_with_retry(url, headers, params=None, max_retries=15, initial_delay=10):
     """
     Выполняет запрос с повторными попытками при ошибках 429 и 5xx.
+    Увеличено количество попыток и время задержек для надежности.
     
     :param url: URL для запроса
     :param headers: Заголовки запроса
     :param params: Параметры запроса
-    :param max_retries: Максимальное количество повторных попыток
-    :param initial_delay: Начальная задержка в секундах (увеличена для избежания 429)
+    :param max_retries: Максимальное количество повторных попыток (по умолчанию 15)
+    :param initial_delay: Начальная задержка в секундах (по умолчанию 10)
     :return: Response объект или None при неудаче
     """
     for attempt in range(max_retries):
@@ -108,15 +110,15 @@ def make_request_with_retry(url, headers, params=None, max_retries=5, initial_de
             
             # Ошибка 429 (Too Many Requests) - нужно повторить с задержкой
             if response.status_code == 429:
-                # Экспоненциальная задержка с увеличенной базой: 8, 16, 32, 64, 128 секунд
-                delay = initial_delay * (2 ** attempt)
+                # Увеличенная экспоненциальная задержка: 10, 20, 40, 80, 160, 320, 640, 1280 сек
+                delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
                 logger.warning(f"⚠️ Ошибка 429 (Too Many Requests). Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
                 time.sleep(delay)
                 continue
             
             # Ошибки 5xx (серверные ошибки) - можно повторить
             if 500 <= response.status_code < 600:
-                delay = initial_delay * (2 ** attempt)
+                delay = min(initial_delay * (3 ** attempt), 1800)  # Максимум 30 минут
                 logger.warning(f"Серверная ошибка {response.status_code}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
                 time.sleep(delay)
                 continue
@@ -125,7 +127,7 @@ def make_request_with_retry(url, headers, params=None, max_retries=5, initial_de
             return response
             
         except requests.exceptions.RequestException as e:
-            delay = initial_delay * (2 ** attempt)
+            delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
             logger.error(f"Ошибка сети при запросе: {e}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
             if attempt < max_retries - 1:
                 time.sleep(delay)
@@ -137,16 +139,14 @@ def make_request_with_retry(url, headers, params=None, max_retries=5, initial_de
     return None
 
 
-def check_task_status(api_key, task_id, max_attempts=60, delay=8):
+def check_task_status(api_key, task_id, max_attempts=50, delay=15):
     """
     Проверяет статус задачи через polling.
     
-    Лимиты API: 1 запрос каждые 5 секунд
-    
     :param api_key: API ключ
     :param task_id: ID задачи
-    :param max_attempts: Максимальное количество попыток (по умолчанию 60 = 8 минут)
-    :param delay: Задержка между попытками в секундах (8 сек с запасом для избежания 429)
+    :param max_attempts: Максимальное количество попыток
+    :param delay: Задержка между попытками в секундах
     :return: True если задача готова, False если нет
     """
     status_url = f"https://seller-analytics-api.wildberries.ru/api/v1/acceptance_report/tasks/{task_id}/status"
@@ -154,7 +154,7 @@ def check_task_status(api_key, task_id, max_attempts=60, delay=8):
     
     for attempt in range(max_attempts):
         try:
-            response = make_request_with_retry(status_url, headers, max_retries=3, initial_delay=8)
+            response = make_request_with_retry(status_url, headers, max_retries=10, initial_delay=5)
             
             if response and response.status_code == 200:
                 status_data = response.json()
@@ -172,14 +172,11 @@ def check_task_status(api_key, task_id, max_attempts=60, delay=8):
                 logger.warning(f"Задача {task_id} не найдена (404)")
                 return False
             
-            # Не ждем после последней попытки
-            if attempt < max_attempts - 1:
-                time.sleep(delay)
+            time.sleep(delay)
             
         except Exception as e:
             logger.error(f"Ошибка при проверке статуса задачи {task_id}: {e}")
-            if attempt < max_attempts - 1:
-                time.sleep(delay)
+            time.sleep(delay)
     
     logger.warning(f"Превышено время ожидания для задачи {task_id}")
     return False
@@ -210,7 +207,7 @@ def get_acceptance_report(api_key, date_from, date_to, supplier):
         }
         
         logger.info(f"[{supplier}] Создание задачи для периода {date_from} - {date_to}")
-        response = make_request_with_retry(url, headers, params=params, max_retries=5, initial_delay=8)
+        response = make_request_with_retry(url, headers, params=params, max_retries=15, initial_delay=10)
         
         if not response or response.status_code != 200:
             logger.error(f"[{supplier}] Ошибка создания задачи: {response.status_code if response else 'Нет ответа'}")
@@ -227,8 +224,7 @@ def get_acceptance_report(api_key, date_from, date_to, supplier):
         logger.info(f"[{supplier}] Создана задача {task_id}")
         
         # Шаг 2: Проверка статуса задачи (polling)
-        # Лимит API: 1 запрос каждые 5 секунд, ждем до 8 минут с увеличенными таймаутами
-        if not check_task_status(api_key, task_id, max_attempts=60, delay=8):
+        if not check_task_status(api_key, task_id, max_attempts=50, delay=15):
             logger.error(f"[{supplier}] Задача {task_id} не завершилась успешно")
             return None
         
@@ -237,7 +233,7 @@ def get_acceptance_report(api_key, date_from, date_to, supplier):
         headers = {'Authorization': api_key}
         
         logger.info(f"[{supplier}] Загрузка данных задачи {task_id}")
-        response_data = make_request_with_retry(download_url, headers, max_retries=5, initial_delay=8)
+        response_data = make_request_with_retry(download_url, headers, max_retries=15, initial_delay=10)
         
         if not response_data or response_data.status_code != 200:
             logger.error(f"[{supplier}] Ошибка загрузки данных: {response_data.status_code if response_data else 'Нет ответа'}")
@@ -335,10 +331,16 @@ def get_acceptance_reports_by_all_ip(dict_api, start_date, end_date):
                 current_start = current_end + timedelta(days=1)
                 cycle_count += 1
                 
-                # Пауза для соблюдения лимитов API (1 запрос/минуту) с запасом
+                # Адаптивная пауза с учетом burst лимита API (3 запроса быстро, потом 120 сек)
+                # Лимит API: 1 запрос/минуту, всплеск 5 запросов - увеличиваем паузы
                 if current_start <= end_dt:  # Не ждем после последнего цикла
-                    logger.info(f"[{supplier}] Пауза 75 секунд для соблюдения лимитов API (с запасом против 429)")
-                    time.sleep(75)
+                    if cycle_count % 3 == 0:
+                        # После каждых 3 циклов - длинная пауза для восстановления burst лимита
+                        logger.info(f"[{supplier}] Пауза 120 секунд для соблюдения лимитов API (цикл {cycle_count})")
+                        time.sleep(120)
+                    else:
+                        # Между циклами внутри burst - средняя пауза
+                        time.sleep(15)
             
             # Объединяем все данные за все периоды
             if all_dataframes:
@@ -537,7 +539,46 @@ def delete_old_acceptance_records(engine):
         # Не прерываем выполнение, т.к. данные уже загружены
 
 
+def generate_acceptance_report_from_march_2025():
+    """
+    Генерирует отчет приемки с 1 марта 2025 года до текущей даты.
+    Использует циклы по 31 день для соблюдения лимитов API.
+    """
+    # Устанавливаем дату начала - 1 марта 2025 года
+    march_1_2025 = datetime(2025, 3, 1)
+    today = datetime.today()
+    
+    # Проверяем, что 1 марта 2025 еще не наступило
+    if today < march_1_2025:
+        logger.warning(f"1 марта 2025 года еще не наступило. Текущая дата: {today.strftime('%Y-%m-%d')}")
+        return "Отчет не может быть сгенерирован - 1 марта 2025 года еще не наступило"
+    
+    start_date = march_1_2025.strftime('%Y-%m-%d')
+    end_date = today.strftime('%Y-%m-%d')
+    
+    logger.info("=" * 80)
+    logger.info(f"Генерация отчета приемки с 1 марта 2025 года")
+    logger.info(f"Период: {start_date} - {end_date}")
+    logger.info(f"Общее количество дней: {(today - march_1_2025).days + 1}")
+    logger.info("=" * 80)
+    
+    try:
+        get_acceptance_reports_by_all_ip(dict_api, start_date, end_date)
+        logger.info("Отчет с 1 марта 2025 года завершен успешно")
+        return "Отчет с 1 марта 2025 года завершен успешно"
+    except Exception as e:
+        logger.error(f"Критическая ошибка при генерации отчета с 1 марта 2025: {e}", exc_info=True)
+        raise
+
+
 if __name__ == "__main__":
+    # Запуск обычного обновления (с 1 марта 2025 до сегодня)
+    logger.info("=" * 80)
+    logger.info(f"Запуск обновления данных приемки")
+    logger.info(f"Период: {start_date} - {end_date}")
+    logger.info(f"Общее количество дней: {(datetime.strptime(end_date, '%Y-%m-%d') - datetime.strptime(start_date, '%Y-%m-%d')).days + 1}")
+    logger.info("=" * 80)
+    
     try:
         get_acceptance_reports_by_all_ip(dict_api, start_date, end_date)
         logger.info("\n✅ Скрипт завершен успешно")

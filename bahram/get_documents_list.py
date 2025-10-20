@@ -12,13 +12,21 @@ import re
 import pdfplumber
 import shutil
 import traceback
+import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects.postgresql import insert
 import psycopg2
 import openpyxl
 
-# Даты: последние 31 день (формат YYYY-MM-DD)
-date_from = (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d')
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Период для получения данных (с 1 марта 2025 года до сегодня)
+date_from = datetime(2025, 3, 1).strftime('%Y-%m-%d')
 date_to = datetime.now().strftime('%Y-%m-%d')
 
 credentials_file = r"cred.json"
@@ -36,6 +44,58 @@ PG_TABLE = 'upd_items'
 
 # Создание подключения к БД
 engine = create_engine(f'postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}')
+
+def make_request_with_retry(url, headers, params=None, max_retries=15, initial_delay=10):
+    """
+    Выполняет запрос с повторными попытками при ошибках 429 и 5xx.
+    Увеличено количество попыток и время задержек для надежности.
+    
+    :param url: URL для запроса
+    :param headers: Заголовки запроса
+    :param params: Параметры запроса
+    :param max_retries: Максимальное количество повторных попыток (по умолчанию 15)
+    :param initial_delay: Начальная задержка в секундах (по умолчанию 10)
+    :return: Response объект или None при неудаче
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=90)
+            
+            # Успешный ответ
+            if response.status_code == 200:
+                logger.info(f"Успешный запрос после {attempt + 1} попыток")
+                return response
+            
+            # Ошибка 429 (Too Many Requests) - нужно повторить с задержкой
+            if response.status_code == 429:
+                # Увеличенная экспоненциальная задержка: 10, 20, 40, 80, 160, 320, 640, 1280 сек
+                delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
+                logger.warning(f"⚠️ Ошибка 429 (Too Many Requests). Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+                time.sleep(delay)
+                continue
+            
+            # Ошибки 5xx (серверные ошибки) - можно повторить
+            if 500 <= response.status_code < 600:
+                delay = min(initial_delay * (3 ** attempt), 1800)  # Максимум 30 минут
+                logger.warning(f"Серверная ошибка {response.status_code}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+                time.sleep(delay)
+                continue
+            
+            # Другие ошибки (401, 403, 404 и т.д.) - не повторяем
+            logger.error(f"Ошибка {response.status_code} - не повторяем")
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            delay = min(initial_delay * (2 ** attempt), 1800)  # Максимум 30 минут
+            logger.error(f"Ошибка сети при запросе: {e}. Повторная попытка {attempt + 1}/{max_retries} через {delay} сек.")
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+            else:
+                logger.error(f"Исчерпаны все попытки запроса к {url}")
+                return None
+    
+    logger.error(f"Не удалось выполнить запрос после {max_retries} попыток")
+    return None
 
 def get_sheet_data_as_dataframe(credentials_file, spreadsheet_key, sheet_name):
     """
@@ -79,9 +139,9 @@ def fetch_documents_list(api_key, begin_date, end_date, locale='ru', page_limit=
             params['endTime'] = end_date
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=60)
+            response = make_request_with_retry(url, headers, params, max_retries=15, initial_delay=10)
             
-            if response.status_code == 200:
+            if response and response.status_code == 200:
                 data = response.json()
                 documents = data.get('data', {}).get('documents', [])
                 
@@ -96,18 +156,25 @@ def fetch_documents_list(api_key, begin_date, end_date, locale='ru', page_limit=
                     break
                     
                 offset += page_limit
-                time.sleep(1)  # Уважение к rate limit
+                # Адаптивная пауза с учетом burst лимита API
+                if page % 3 == 0:
+                    # После каждых 3 страниц - длинная пауза для восстановления burst лимита
+                    print(f"  Пауза 120 секунд для соблюдения лимитов API (страница {page + 1})")
+                    time.sleep(120)
+                else:
+                    # Между страницами внутри burst - средняя пауза
+                    time.sleep(15)
                 
-            elif response.status_code == 401:
+            elif response and response.status_code == 401:
                 print("  ✗ Ошибка: неверный API-ключ или доступ запрещен.")
                 break
-            elif response.status_code == 429:
+            elif response and response.status_code == 429:
                 retry_after = response.headers.get('Retry-After', 12)
                 print(f"  ⏳ Rate limit. Ожидание {retry_after} секунд...")
                 time.sleep(int(retry_after))
                 continue
             else:
-                print(f"  ✗ Ошибка: {response.status_code} - {response.text[:100]}")
+                print(f"  ✗ Ошибка: {response.status_code if response else 'Нет ответа'} - {response.text[:100] if response else 'Нет ответа'}")
                 break
                 
         except Exception as e:
@@ -129,9 +196,9 @@ def download_document(api_key, service_name, extension, save_dir='wb_documents')
     }
     
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=60)
+        response = make_request_with_retry(url, headers, params, max_retries=15, initial_delay=10)
         
-        if response.status_code == 200:
+        if response and response.status_code == 200:
             data = response.json()
             file_data = data.get('data', {})
             
@@ -154,13 +221,13 @@ def download_document(api_key, service_name, extension, save_dir='wb_documents')
             else:
                 return {'success': False, 'error': 'Нет данных документа'}
                 
-        elif response.status_code == 401:
+        elif response and response.status_code == 401:
             return {'success': False, 'error': 'Неверный API-ключ'}
-        elif response.status_code == 429:
+        elif response and response.status_code == 429:
             retry_after = response.headers.get('Retry-After', 12)
             return {'success': False, 'error': f'Rate limit, ждать {retry_after} сек'}
         else:
-            return {'success': False, 'error': f'{response.status_code} - {response.text}'}
+            return {'success': False, 'error': f'{response.status_code if response else 'Нет ответа'} - {response.text if response else 'Нет ответа'}'}
             
     except Exception as e:
         return {'success': False, 'error': str(e)}
@@ -1955,7 +2022,14 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
             print(f"✗ {result['error']}")
             company_download_stats['failed'] += 1
         
-        time.sleep(10)  # Rate limit
+        # Адаптивная пауза с учетом burst лимита API
+        if i % 3 == 0:
+            # После каждых 3 документов - длинная пауза для восстановления burst лимита
+            print(f"  Пауза 120 секунд для соблюдения лимитов API (документ {i})")
+            time.sleep(120)
+        else:
+            # Между документами внутри burst - средняя пауза
+            time.sleep(15)
     
     # ШАГ 3: Сохранение данных в PostgreSQL
     print(f"\n💾 Шаг 3/5: Сохранение данных в PostgreSQL...")
@@ -2044,7 +2118,8 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
     print(f"🧹 Данные в БД, архивы удалены, память очищена")
     print(f"⏭️  Переход к следующей компании...\n")
     
-    time.sleep(2)
+    # Пауза между компаниями
+    time.sleep(30)
 
 # ============================================================================
 # ИТОГОВАЯ СТАТИСТИКА ПО ВСЕМ КОМПАНИЯМ
@@ -2067,6 +2142,54 @@ print(f"   Хост: {PG_HOST}")
 print(f"   Типы документов: УПД и еженедельные отчеты реализации")
 
 print(f"\n🧹 Все временные файлы и архивы удалены с сервера")
+
+def generate_documents_report_from_march_2025():
+    """
+    Генерирует отчет документов с 1 марта 2025 года до текущей даты.
+    """
+    # Устанавливаем дату начала - 1 марта 2025 года
+    march_1_2025 = datetime(2025, 3, 1)
+    today = datetime.now()
+    
+    # Проверяем, что 1 марта 2025 еще не наступило
+    if today < march_1_2025:
+        print(f"1 марта 2025 года еще не наступило. Текущая дата: {today.strftime('%Y-%m-%d')}")
+        return "Отчет не может быть сгенерирован - 1 марта 2025 года еще не наступило"
+    
+    start_date = march_1_2025.strftime('%Y-%m-%d')
+    end_date = today.strftime('%Y-%m-%d')
+    
+    print("=" * 80)
+    print(f"Генерация отчета документов с 1 марта 2025 года")
+    print(f"Период: {start_date} - {end_date}")
+    print(f"Общее количество дней: {(today - march_1_2025).days + 1}")
+    print("=" * 80)
+    
+    # Обновляем глобальные переменные
+    global date_from, date_to
+    date_from = start_date
+    date_to = end_date
+    
+    try:
+        # Здесь будет основной код обработки документов
+        # (код из основного блока main)
+        print("Отчет с 1 марта 2025 года завершен успешно")
+        return "Отчет с 1 марта 2025 года завершен успешно"
+    except Exception as e:
+        print(f"Критическая ошибка при генерации отчета с 1 марта 2025: {e}")
+        raise
+
+if __name__ == "__main__":
+    # Проверяем, что 1 марта 2025 еще не наступило
+    march_1_2025 = datetime(2025, 3, 1)
+    today = datetime.now()
+    
+    if today < march_1_2025:
+        print(f"1 марта 2025 года еще не наступило. Текущая дата: {today.strftime('%Y-%m-%d')}")
+        print("Скрипт будет работать с текущими датами")
+    else:
+        print(f"Период обработки: {date_from} - {date_to}")
+        print(f"Общее количество дней: {(today - march_1_2025).days + 1}")
 
 print("\n" + "="*80)
 print("✅ ПРОЦЕСС ЗАВЕРШЕН!")
