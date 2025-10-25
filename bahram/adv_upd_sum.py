@@ -10,9 +10,8 @@ from sqlalchemy import create_engine, text
 # Database connection
 engine = create_engine('postgresql://bahram:Dadajonim99@94.103.84.245:5432/wb_baah')
 
-# Dates: last 3 months to today (will be split into cycles of 31 days max)
-# 3 месяца = примерно 90 дней
-date_from = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+# Dates: custom period from 2025-06-25 to 2025-08-25
+date_from = '2025-10-01'
 date_to = datetime.now().strftime('%Y-%m-%d')
 
 credentials_file = '/home/baakhofficial/wbauto/bahram/cred.json'

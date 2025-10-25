@@ -1,7 +1,29 @@
 CREATE OR REPLACE VIEW reports.v_acceptance_by_nm_id AS
-WITH
-latest_acceptance AS (
-    SELECT *
+SELECT 
+    CASE 
+    WHEN a.nmid IS NULL OR a.nmid = 0 THEN fi.nmid
+    ELSE a.nmid
+END AS nmid,
+    a.total::numeric AS total_acceptance,
+    a.shkcreatedate::date AS rr_dt, 
+    a.monday_date::date AS date_from, 
+    a.sunday_date::date AS date_to,
+    r.realizationreport_id
+FROM (
+    SELECT *,
+        CASE 
+            WHEN EXTRACT(DOW FROM shkcreatedate::date) = 0
+                THEN (shkcreatedate::date + INTERVAL '1 day')
+            ELSE (shkcreatedate::date - ((EXTRACT(DOW FROM shkcreatedate::date)::int - 1 + 7) % 7) * INTERVAL '1 day')
+        END AS monday_date,
+        CASE 
+            WHEN EXTRACT(DOW FROM shkcreatedate::date) = 0
+                THEN (shkcreatedate::date + INTERVAL '7 day')
+            ELSE (
+                (shkcreatedate::date - ((EXTRACT(DOW FROM shkcreatedate::date)::int - 1 + 7) % 7) * INTERVAL '1 day') 
+                + INTERVAL '6 day'
+            )
+        END AS sunday_date
     FROM (
         SELECT *,
                ROW_NUMBER() OVER (
@@ -11,48 +33,101 @@ latest_acceptance AS (
         FROM reports.acceptance
     ) t
     WHERE rn = 1
-),
-dfr_agg AS (
-    SELECT supplier, date_from::date, date_to::date, MIN(realizationreport_id) AS realizationreport_id
+) a
+LEFT JOIN (
+    SELECT 
+        DISTINCT 
+        supplier,
+        date_from::date AS date_from,
+        date_to::date AS date_to,
+        realizationreport_id
     FROM reports.detail_finance_reports
     WHERE report_type = 1
-    GROUP BY supplier, date_from::date, date_to::date
-),
-detail_agg AS (
-    SELECT
-        supplier,
-        rr_dt::date,
-        nm_id,
-        date_from::date,
-        date_to::date,
-        SUM(acceptance) AS total_acceptance,
-        MIN(realizationreport_id) AS realizationreport_id
-    FROM reports.detail_finance_reports
-    WHERE acceptance <> 0
-      AND nm_id <> 0
-    GROUP BY supplier, rr_dt, nm_id, date_from, date_to
-),
-acceptance_agg AS (
-    SELECT
-        la.supplier,
-        la.shkcreatedate::date AS rr_dt,
-        la.nmid AS nm_id,  -- привели к единому имени
-        date_trunc('week', la.shkcreatedate::date)::date AS date_from,
-        (date_trunc('week', la.shkcreatedate::date) + interval '6 days')::date AS date_to,
-        SUM(COALESCE(NULLIF(la.total::text, 'NaN')::numeric, 0)) AS total_acceptance,
-        dfr_agg.realizationreport_id
-    FROM latest_acceptance la
-    JOIN dfr_agg
-      ON la.supplier = dfr_agg.supplier
-     AND date_trunc('week', la.shkcreatedate::date)::date = dfr_agg.date_from
-     AND (date_trunc('week', la.shkcreatedate::date) + interval '6 days')::date = dfr_agg.date_to
-    WHERE la.shkcreatedate::date >= DATE '2025-08-01'
-    GROUP BY la.supplier, rr_dt, la.nmid, date_from, date_to, dfr_agg.realizationreport_id
-)
-SELECT * FROM detail_agg
-UNION ALL
-SELECT * FROM acceptance_agg
-ORDER BY supplier, date_from;
+) r
+    ON LOWER(COALESCE(a.supplier, '')) = LOWER(COALESCE(r.supplier, ''))
+   AND a.monday_date = r.date_from
+   AND a.sunday_date = r.date_to
+LEFT JOIN (
+    SELECT 
+        incomeid,
+        MAX(nmid) AS nmid
+    FROM supplies.fbo_incomes
+    GROUP BY incomeid
+    HAVING COUNT(DISTINCT nmid) = 1
+) fi
+ON a.incomeid::text = fi.incomeid::text
+
+UNION ALL 
+
+SELECT 
+nm_id AS nmid, 
+acceptance::numeric AS total_acceptance,
+sale_dt::date AS rr_dt, 
+date_from::date, 
+date_to::date,
+realizationreport_id
+FROM reports.detail_finance_reports r
+WHERE r.report_type = 1
+AND date_from::date>= '2025-03-01'
+AND acceptance <>0
+AND nm_id <> 0
+
+
+-- CREATE OR REPLACE VIEW reports.v_acceptance_by_nm_id AS
+-- WITH
+-- latest_acceptance AS (
+--     SELECT *
+--     FROM (
+--         SELECT *,
+--                ROW_NUMBER() OVER (
+--                    PARTITION BY supplier, shkcreatedate, incomeid, nmid, gicreatedate
+--                    ORDER BY update_time DESC
+--                ) AS rn
+--         FROM reports.acceptance
+--     ) t
+--     WHERE rn = 1
+-- ),
+-- dfr_agg AS (
+--     SELECT supplier, date_from::date, date_to::date, MIN(realizationreport_id) AS realizationreport_id
+--     FROM reports.detail_finance_reports
+--     WHERE report_type = 1
+--     GROUP BY supplier, date_from::date, date_to::date
+-- ),
+-- detail_agg AS (
+--     SELECT
+--         supplier,
+--         rr_dt::date,
+--         nm_id,
+--         date_from::date,
+--         date_to::date,
+--         SUM(acceptance) AS total_acceptance,
+--         MIN(realizationreport_id) AS realizationreport_id
+--     FROM reports.detail_finance_reports
+--     WHERE acceptance <> 0
+--       AND nm_id <> 0
+--     GROUP BY supplier, rr_dt, nm_id, date_from, date_to
+-- ),
+-- acceptance_agg AS (
+--     SELECT
+--         la.supplier,
+--         la.shkcreatedate::date AS rr_dt,
+--         la.nmid AS nm_id,  -- привели к единому имени
+--         date_trunc('week', la.shkcreatedate::date)::date AS date_from,
+--         (date_trunc('week', la.shkcreatedate::date) + interval '6 days')::date AS date_to,
+--         SUM(COALESCE(NULLIF(la.total::text, 'NaN')::numeric, 0)) AS total_acceptance,
+--         dfr_agg.realizationreport_id
+--     FROM latest_acceptance la
+--     JOIN dfr_agg
+--       ON la.supplier = dfr_agg.supplier
+--      AND date_trunc('week', la.shkcreatedate::date)::date = dfr_agg.date_from
+--      AND (date_trunc('week', la.shkcreatedate::date) + interval '6 days')::date = dfr_agg.date_to
+--     WHERE la.shkcreatedate::date >= DATE '2025-03-01'
+--     GROUP BY la.supplier, rr_dt, la.nmid, date_from, date_to, dfr_agg.realizationreport_id
+-- )
+-- SELECT * FROM detail_agg
+-- UNION ALL
+-- SELECT * FROM acceptance_agg
+-- ORDER BY supplier, date_from;
 
 
 -- CREATE OR REPLACE VIEW reports.v_acceptance_by_nm_id AS

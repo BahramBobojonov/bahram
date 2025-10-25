@@ -29,7 +29,7 @@ df_investors = df_investors[(df_investors['API ключ'] != '')&(df_investors['
 dict_api = dict(zip(df_investors['API ключ'], df_investors['Имя Юрлица']))
 
 # Период для получения данных (с 1 марта 2025 года до сегодня)
-start_date = datetime(2025, 3, 1).strftime('%Y-%m-%d')
+start_date = datetime(2025, 10, 1).strftime('%Y-%m-%d')
 end_date = datetime.today().strftime('%Y-%m-%d')
 
 

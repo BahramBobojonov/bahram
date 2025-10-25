@@ -29,7 +29,7 @@ df_investors = df_investors[(df_investors['API ключ'] != '') & (df_investors
 dict_api = dict(zip(df_investors['API ключ'], df_investors['Имя Юрлица']))
 
 # Configurable dates - for testing, use small period; for full, '2024-01-29'
-start_date = (datetime.now() - timedelta(days=628)).strftime('%Y-%m-%d')  # Last 14 days as requested
+start_date = (datetime.now() - timedelta(days=25)).strftime('%Y-%m-%d')  # Last 14 days as requested
 end_date = datetime.today().strftime('%Y-%m-%d')
 
 def fetch_report_chunk(api_key, date_from, date_to, rrdid):

@@ -5,9 +5,7 @@ SELECT
   COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) AS date_from,
   COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) AS date_to,
   COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) AS rr_dt,
-  CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+  CASE
     WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
   END AS storage_fee_total,
@@ -67,12 +65,10 @@ SELECT
 -
   COALESCE(a.additional_payment_total::numeric, 0)
 -
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+  CASE
     WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
-END
+  END
 -
 COALESCE(c.total_acceptance::numeric, 0)
 -
@@ -102,12 +98,10 @@ AS total_to_transfer,
 -
   COALESCE(a.additional_payment_total::numeric, 0)
 -
-CASE 
-    WHEN COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint, 0) = 0 THEN 0
-    WHEN COALESCE(a.storage_fee_total::numeric, 0) <> 0 THEN a.storage_fee_total::numeric
+  CASE
     WHEN COALESCE(b.storage_fee_total::numeric, 0) <> 0 THEN b.storage_fee_total::numeric
     ELSE 0
-END
+  END
 -
 COALESCE(c.total_acceptance::numeric, 0)
 -
@@ -124,13 +118,15 @@ COALESCE(a.deduction_other_total::numeric, 0)
    * CAST(:tax_rate AS numeric))
 - (COALESCE(a.quantity_sales, 0) * COALESCE(cp.cost_price_sum, 0)) AS profit_after_all  -- tax_amoun
 FROM reports.mv_detail_finance_reports_v1 a
-FULL JOIN reports.v_storage_fee_by_nmid b
+FULL JOIN (SELECT date, supplier, nmid, date_from, date_to, sum(total_warehouseprice)::numeric AS storage_fee_total, realizationreport_id FROM reports.v_storage_fee_by_nmid 
+group BY date, supplier, nmid, date_from, date_to, realizationreport_id) b
   ON a.rr_dt = b.date
  AND a.nm_id = b.nmid::bigint
  and a.realizationreport_id = b.realizationreport_id
-FULL JOIN reports.v_acceptance_by_nm_id c
-  ON COALESCE(a.rr_dt, b.date) = c.rr_dt
- AND COALESCE(a.nm_id, b.nmid::bigint) = c.nm_id
+FULL JOIN ( SELECT supplier, rr_dt::date,nmid AS nm_id,date_from::date,date_to::date,realizationreport_id, sum(total_acceptance) AS total_acceptance  FROM reports.v_acceptance_by_nm_id
+  GROUP BY supplier, rr_dt::date,nm_id,date_from::date,date_to::date,realizationreport_id) c
+  ON COALESCE(a.rr_dt, b.date) = c.rr_dt::date
+ AND COALESCE(a.nm_id, b.nmid::bigint) = c.nm_id::bigint
  and COALESCE(a.realizationreport_id, b.realizationreport_id) = c.realizationreport_id
 FULL JOIN (
   SELECT 
@@ -140,13 +136,15 @@ FULL JOIN (
     date_to::date, 
     realizationreport_id, 
     supplier, 
-    SUM(deduction) AS sum_deduction
+    SUM(updsum_per_item::numeric) AS sum_deduction
   FROM reports.v_deduction_by_nm_id
   GROUP BY nm_id::bigint, sale_dt::date, date_from::date, date_to::date, realizationreport_id, supplier
 ) d
   ON COALESCE(a.rr_dt, b.date, c.rr_dt) = d.sale_dt
  AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id) = d.nm_id
  and COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id) = d.realizationreport_id
+ and COALESCE(a.date_from, b.date_from, c.date_from, d.date_from) = d.date_from::date
+ and COALESCE(a.date_to, b.date_to, c.date_to, d.date_to) = d.date_to::date
 FULL JOIN reports.v_bonus_review_deductions f
   ON COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt) = f.rr_dt
  AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id) = f.product_id::bigint

@@ -84,7 +84,7 @@ def load_rates_dataframe():
     
     # Убираем строки без имени юрлица
     df = df[df['Имя Юрлица'].astype(str).str.strip() != '']
-    
+    #df = df[df['Имя Юрлица'] != 'ИП Астахова А.А.']
     logger.info(f"✅ Загружено {len(df)} записей с налоговыми ставками из Google Sheet")
     return df
 
@@ -141,16 +141,79 @@ def save_to_table(df, table_name, schema='reports', if_exists='append', chunksiz
         chunksize: Размер порции для вставки
     """
     try:
-        df.to_sql(
-            name=table_name,
-            con=ENGINE,
-            schema=schema,
-            if_exists=if_exists,
-            index=False,
-            method='multi',
-            chunksize=chunksize
-        )
-        logger.info(f"✅ Данные сохранены в {schema}.{table_name}: {len(df)} строк")
+        # Защита от превышения лимита параметров в PostgreSQL (65535)
+        # При method='multi' количество биндов = chunksize * num_columns
+        # Вычисляем безопасный размер порции динамически с запасом
+        num_columns = len(df.columns)
+        if num_columns <= 0:
+            logger.info(f"⚠ Пропуск сохранения в {schema}.{table_name}: пустой DataFrame")
+            return
+
+        POSTGRES_PARAM_LIMIT = 65535
+        SAFETY_MARGIN = 0.95  # небольшой запас, чтобы не упираться в лимит
+        max_params = int(POSTGRES_PARAM_LIMIT * SAFETY_MARGIN)
+        max_chunk_by_params = max(1, max_params // max(1, num_columns))
+
+        effective_chunksize = min(chunksize, max_chunk_by_params)
+
+        if effective_chunksize < chunksize:
+            logger.info(
+                f"🔧 chunksize уменьшен с {chunksize} до {effective_chunksize} (столбцов: {num_columns}, лимит биндов ~{max_params})"
+            )
+
+        # Приводим столбцы DataFrame к схеме целевой таблицы, чтобы избежать UndefinedColumn
+        # Используем отдельное подключение для чтения схемы
+        table_columns = []
+        with ENGINE.connect() as conn:
+            try:
+                result = conn.execute(text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = :schema AND table_name = :table
+                    ORDER BY ordinal_position
+                    """
+                ), {"schema": schema, "table": table_name})
+                table_columns = [row[0] for row in result.fetchall()]
+                conn.commit()  # Явно коммитим, чтобы закрыть транзакцию
+            except Exception as e:
+                conn.rollback()  # Откатываем при ошибке
+                raise
+
+        # Если режим append и таблица существует - выравниваем столбцы
+        if if_exists == 'append' and table_columns:
+            # Оставляем только существующие в БД столбцы
+            df_aligned = df.copy()
+            df_aligned = df_aligned[[col for col in df_aligned.columns if col in table_columns]]
+
+            # Добавляем недостающие столбцы как NULL
+            for col in table_columns:
+                if col not in df_aligned.columns:
+                    df_aligned[col] = None
+
+            # Упорядочиваем столбцы по порядку в таблице
+            df_aligned = df_aligned[table_columns]
+        else:
+            # Для replace или если таблицы нет - используем DataFrame как есть
+            df_aligned = df.copy()
+
+        # Используем отдельное подключение для записи
+        with ENGINE.connect() as conn:
+            try:
+                df_aligned.to_sql(
+                    name=table_name,
+                    con=conn,
+                    schema=schema,
+                    if_exists=if_exists,
+                    index=False,
+                    method='multi',
+                    chunksize=effective_chunksize
+                )
+                conn.commit()  # Явно коммитим
+                logger.info(f"✅ Данные сохранены в {schema}.{table_name}: {len(df_aligned)} строк")
+            except Exception as e:
+                conn.rollback()  # Откатываем при ошибке
+                raise
     except Exception as e:
         logger.error(f"❌ Ошибка при сохранении в {schema}.{table_name}: {e}")
         raise

@@ -29,8 +29,8 @@ df_investors = df_investors[(df_investors['API ключ'] != '')&(df_investors['
 
 
 # Период для получения данных (с 1 марта 2025 года до сегодня)
-start_date = datetime(2025, 3, 1).strftime('%Y-%m-%d')
-end_date = datetime.today().strftime('%Y-%m-%d')
+start_date = datetime(2025, 10, 1).strftime('%Y-%m-%d')
+end_date = datetime.now().strftime('%Y-%m-%d')
 
 
 def ensure_table_columns(engine, schema, table_name, df):
@@ -331,7 +331,10 @@ def get_paid_storage_data(start_date, end_date):
                 # Шаг 5: Проверка и создание недостающих столбцов
                 ensure_table_columns(engine, 'reports', 'paid_storage', df_combined)
                 
-                # Шаг 6: Загрузка данных в БД
+                # Шаг 6: Удаление существующих данных для этого ИП за период ПЕРЕД загрузкой новых
+                delete_paid_storage_for_period(engine, ip, start_date, end_date)
+                
+                # Шаг 7: Загрузка новых данных в БД
                 df_combined.to_sql(name='paid_storage', con=engine, schema='reports', if_exists='append', index=False)
                 logger.info(f"Загружено {len(df_combined)} записей для {ip} за весь период")
                 
@@ -350,12 +353,6 @@ def get_paid_storage_data(start_date, end_date):
         if idx < len(df_investors) - 1:  # Не ждем после последнего ИП
             logger.info(f"Пауза 30 секунд перед обработкой следующего ИП...")
             time.sleep(30)
-    
-    # Очистка старых записей после успешной загрузки
-    if success_count > 0:
-        logger.info("Начинаем удаление дублей и устаревших записей...")
-        delete_old_paid_storage_records(engine)
-        logger.info("✅ Дедупликация завершена успешно")
     
     logger.info(f"Обработка завершена. Успешно: {success_count}, Ошибок: {error_count}, Ошибок авторизации: {auth_error_count}")
     return f"Данные успешно обновлены. Успешно: {success_count}, Ошибок: {error_count}, Ошибок авторизации: {auth_error_count}"
@@ -480,54 +477,149 @@ def save_raw_api_response_to_excel(start_date, end_date, supplier_name="Баах
         return None
 
 
-def delete_old_paid_storage_records(engine):
+def delete_paid_storage_for_period(engine, supplier, date_start, date_end):
     """
-    Удаляет старые записи из таблицы reports.paid_storage, оставляя только последнюю запись для каждого уникального набора данных.
+    Удаляет существующие записи из таблицы reports.paid_storage для конкретного ИП за указанный период.
     
-    ВАЖНО: В ключ дедупликации включены officeid и calctype, потому что API возвращает отдельные записи для:
-    - Разных типов расчета (calcType): основной тариф, скидки программы лояльности, скидки на остаток и т.д.
-    - Разных складов (officeId) - даже если название (warehouse) одинаковое
-    Все эти записи являются ВАЛИДНЫМИ и должны суммироваться в отчетах.
-
-    :param engine: Экземпляр SQLAlchemy Engine для подключения к базе данных.
+    Эта функция вызывается ПЕРЕД загрузкой новых данных, чтобы избежать дубликатов.
+    Вместо сложной дедупликации просто удаляем старые данные и загружаем свежие.
+    
+    :param engine: Экземпляр SQLAlchemy Engine для подключения к базе данных
+    :param supplier: Имя компании (ИП) для удаления данных. Если None, удаляется вся таблица за период
+    :param date_start: Начальная дата периода (формат YYYY-MM-DD)
+    :param date_end: Конечная дата периода (формат YYYY-MM-DD)
     """
-    query = """
-    WITH ranked_records AS (
-        SELECT ctid,
-               ROW_NUMBER() OVER (
-                   PARTITION BY supplier, date, giid, chrtid, barcode, nmid, warehouse, officeid, calctype
-                   ORDER BY update_time DESC
-               ) AS rn
-        FROM reports.paid_storage
-    )
-    DELETE FROM reports.paid_storage
-    WHERE ctid IN (
-        SELECT ctid 
-        FROM ranked_records 
-        WHERE rn > 1
-    );
-    """
+    if supplier:
+        query = """
+        DELETE FROM reports.paid_storage
+        WHERE supplier = :supplier
+          AND date >= :date_start
+          AND date <= :date_end
+        """
+        params = {'supplier': supplier, 'date_start': date_start, 'date_end': date_end}
+    else:
+        query = """
+        DELETE FROM reports.paid_storage
+        WHERE date >= :date_start
+          AND date <= :date_end
+        """
+        params = {'date_start': date_start, 'date_end': date_end}
 
     try:
         with engine.begin() as connection:
-            logger.info("Выполняется SQL запрос на удаление дубликатов...")
-            result = connection.execute(text(query))
+            logger.info(f"Удаление существующих данных для {supplier} за период {date_start} - {date_end}")
+            result = connection.execute(text(query), params)
             deleted_rows = result.rowcount
-            logger.info(f"Удалено {deleted_rows} дублированных записей из таблицы paid_storage")
-            
-            # Дополнительная проверка: удаляем записи старше 60 дней для экономии места
-            cleanup_query = """
-            DELETE FROM reports.paid_storage 
-            WHERE update_time < NOW() - INTERVAL '60 days'
-            """
-            cleanup_result = connection.execute(text(cleanup_query))
-            cleanup_rows = cleanup_result.rowcount
-            if cleanup_rows > 0:
-                logger.info(f"Удалено {cleanup_rows} записей старше 60 дней")
+            logger.info(f"Удалено {deleted_rows} записей для {supplier} за период {date_start} - {date_end}")
+            return deleted_rows
                 
     except Exception as e:
-        logger.error(f"Ошибка при удалении старых записей: {e}")
+        logger.error(f"Ошибка при удалении данных для {supplier}: {e}")
         raise
+
+
+def get_paid_storage_for_single_supplier(supplier_name, start_date, end_date):
+    """
+    Получает данные о платном хранении для одного конкретного ИП за указанный период.
+    
+    :param supplier_name: Имя ИП (например, "ИП Астахова А.А.")
+    :param start_date: Дата начала периода (формат YYYY-MM-DD)
+    :param end_date: Дата окончания периода (формат YYYY-MM-DD)
+    :return: Сообщение о результате
+    """
+    logger.info("=" * 80)
+    logger.info(f"Запуск обновления для {supplier_name}")
+    logger.info(f"Период: {start_date} - {end_date}")
+    logger.info("=" * 80)
+    
+    # Находим данные для указанного поставщика
+    supplier_data = df_investors[df_investors['Имя Юрлица'].str.contains(supplier_name, case=False, na=False)]
+    
+    if supplier_data.empty:
+        error_msg = f"ИП '{supplier_name}' не найден в таблице инвесторов"
+        logger.error(error_msg)
+        return error_msg
+    
+    supplier_row = supplier_data.iloc[0]
+    ip = supplier_row['Имя Юрлица']
+    api_key = supplier_row['API ключ']
+    
+    logger.info(f"Найден ИП: {ip}")
+    
+    # Преобразуем строки в datetime объекты
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    # Вычисляем количество дней
+    total_days = (end_dt - start_dt).days + 1
+    logger.info(f"Общий период: {total_days} дней")
+    
+    all_dataframes = []
+    auth_error_occurred = False
+    
+    # Разбиваем период на циклы по 8 дней
+    current_start = start_dt
+    cycle_count = 0
+    while current_start <= end_dt and not auth_error_occurred:
+        # Определяем конец текущего цикла (максимум 8 дней)
+        current_end = min(current_start + timedelta(days=7), end_dt)
+        
+        period_start_str = current_start.strftime('%Y-%m-%d')
+        period_end_str = current_end.strftime('%Y-%m-%d')
+        
+        logger.info(f"Запрос данных для {ip} за период {period_start_str} - {period_end_str}")
+        
+        # Получаем данные за текущий период
+        df_period = get_paid_storage_data_for_supplier(ip, api_key, period_start_str, period_end_str)
+        
+        if df_period is not None:
+            all_dataframes.append(df_period)
+        else:
+            # Проверяем, была ли это ошибка авторизации
+            if cycle_count == 0:
+                logger.warning(f"Первый запрос для {ip} не дал данных. Возможна ошибка авторизации.")
+                auth_error_occurred = True
+                return f"Ошибка получения данных для {ip} - возможна проблема с авторизацией"
+        
+        # Переходим к следующему периоду
+        current_start = current_end + timedelta(days=1)
+        cycle_count += 1
+        
+        # Пауза между циклами
+        if current_start <= end_dt and not auth_error_occurred:
+            if cycle_count % 3 == 0:
+                logger.info(f"Пауза 120 секунд для соблюдения лимитов API (цикл {cycle_count})")
+                time.sleep(120)
+            else:
+                time.sleep(15)
+    
+    # Объединяем все данные за все периоды
+    if all_dataframes and not auth_error_occurred:
+        try:
+            df_combined = pd.concat(all_dataframes, ignore_index=True)
+            
+            # Проверка и создание недостающих столбцов
+            ensure_table_columns(engine, 'reports', 'paid_storage', df_combined)
+            
+            # Удаление существующих данных для этого ИП за период ПЕРЕД загрузкой новых
+            delete_paid_storage_for_period(engine, ip, start_date, end_date)
+            
+            # Загрузка новых данных в БД
+            df_combined.to_sql(name='paid_storage', con=engine, schema='reports', if_exists='append', index=False)
+            logger.info(f"✅ Загружено {len(df_combined)} записей для {ip} за весь период")
+            
+            success_msg = f"✅ Данные успешно обновлены для {ip}. Загружено {len(df_combined)} записей"
+            logger.info(success_msg)
+            return success_msg
+            
+        except Exception as e:
+            error_msg = f"❌ Ошибка при обработке данных для {ip}: {e}"
+            logger.error(error_msg, exc_info=True)
+            return error_msg
+    else:
+        error_msg = f"❌ Не получено данных для {ip} за период {start_date} - {end_date}"
+        logger.warning(error_msg)
+        return error_msg
 
 
 def generate_report_from_march_2025():

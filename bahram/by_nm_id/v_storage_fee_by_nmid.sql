@@ -1,48 +1,139 @@
 -- ============================================================================
 -- ФИНАЛЬНЫЙ SQL: Разбивка storage_fee по номенклатурам (nm_id)
 -- ============================================================================
--- Назначение: Получить детальную разбивку storage_fee по каждой номенклатуре
--- Использование: Для финансовых дашбордов и отчётов
--- 
--- ВАЖНО:
--- 1. Используется фильтр WHERE storage_fee_total != 0 (исключаем дубли)
--- 2. Данные берутся из reports.paid_storage (детализация по nm_id)
--- 3. Джойн с aggregated_finance_report для сверки периодов
--- ============================================================================
-CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid AS
-WITH latest_ps AS (
-    SELECT *
-    FROM (
-        SELECT *,
-               ROW_NUMBER() OVER (
-                   PARTITION BY supplier, date, giid, chrtid, barcode, nmid, warehouse, officeid, calctype
-                   ORDER BY update_time DESC
-               ) AS rn
-        FROM reports.paid_storage
-    ) t
-    WHERE rn = 1
+CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid AS 
+SELECT * FROM reports.v_storage_fee_by_nmid_step_0
+UNION ALL
+SELECT
+        sale_dt::date AS date,
+        supplier,
+        nm_id AS nmid,
+        date_from::date,
+        date_to::date,
+        SUM(storage_fee::numeric) AS total_warehouseprice,
+        realizationreport_id
+    FROM reports.detail_finance_reports
+    WHERE storage_fee::numeric <> 0
+      AND nm_id <> 0
+     AND date_from::date>='2025-03-01'
+    AND  report_type = 1
+    GROUP BY 1,2,3,4,5,7
+
+
+    CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid_step_0 AS
+WITH storage_weekly AS (
+    SELECT
+        date::date,
+        supplier,
+        NMID,
+        date_trunc('week', date::timestamp)::date AS date_from,
+        (date_trunc('week', date::timestamp)::date + INTERVAL '6 days')::date AS date_to,
+        SUM(warehouseprice) AS total_warehouseprice
+    FROM reports.paid_storage
+    GROUP BY 1, 2, 3, 4
 ),
-dfr_agg AS (
-    SELECT supplier, date_from::date, date_to::date, MIN(realizationreport_id) AS realizationreport_id
+finance_reports AS (
+    SELECT
+        supplier,
+        date_from::date AS date_from,
+        date_to::date AS date_to,
+        MIN(realizationreport_id) AS realizationreport_id
     FROM reports.detail_finance_reports
     WHERE report_type = 1
     GROUP BY supplier, date_from::date, date_to::date
 )
 SELECT
-    ps.date,
-    ps.nmid,
-    ps.supplier,
-    date_trunc('week', ps.date)::date AS date_from,
-    (date_trunc('week', ps.date) + interval '6 days')::date AS date_to,
-    SUM(ps.warehouseprice) AS storage_fee_total,
-    dfr_agg.realizationreport_id
-FROM latest_ps ps
-JOIN dfr_agg
-    ON ps.supplier = dfr_agg.supplier
-    AND date_trunc('week', ps.date)::date = dfr_agg.date_from
-    AND (date_trunc('week', ps.date) + interval '6 days')::date = dfr_agg.date_to
-WHERE ps.date::date >= '2025-08-25'
-GROUP BY ps.date, ps.nmid, ps.supplier, date_from, date_to, dfr_agg.realizationreport_id;
+    s.date,
+    s.supplier,
+    s.NMID,
+    s.date_from,
+    s.date_to,
+    s.total_warehouseprice,
+    f.realizationreport_id
+FROM storage_weekly s
+LEFT JOIN finance_reports f
+    ON LOWER(COALESCE(s.supplier, '')) = LOWER(COALESCE(f.supplier, ''))
+    AND s.date_from = f.date_from
+    AND s.date_to = f.date_to;
+
+
+
+
+
+
+
+
+
+-- ============================================================================
+-- CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid AS
+-- WITH storage_weekly AS (
+--     SELECT
+--         date::date,
+--         supplier,
+--         NMID,
+--         date_trunc('week', date::timestamp)::date AS date_from,
+--         (date_trunc('week', date::timestamp)::date + INTERVAL '6 days')::date AS date_to,
+--         SUM(warehouseprice) AS total_warehouseprice
+--     FROM reports.paid_storage
+--     GROUP BY 1, 2, 3, 4
+-- ),
+-- finance_reports AS (
+--     SELECT
+--         supplier,
+--         date_from::date AS date_from,
+--         date_to::date AS date_to,
+--         MIN(realizationreport_id) AS realizationreport_id
+--     FROM reports.detail_finance_reports
+--     WHERE report_type = 1
+--     GROUP BY supplier, date_from::date, date_to::date
+-- )
+-- SELECT
+--     s.date,
+--     s.supplier,
+--     s.NMID,
+--     s.date_from,
+--     s.date_to,
+--     s.total_warehouseprice,
+--     f.realizationreport_id
+-- FROM storage_weekly s
+-- LEFT JOIN finance_reports f
+--     ON LOWER(COALESCE(s.supplier, '')) = LOWER(COALESCE(f.supplier, ''))
+--     AND s.date_from = f.date_from
+--     AND s.date_to = f.date_to;
+-- CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid AS
+-- WITH latest_ps AS (
+--     SELECT *
+--     FROM (
+--         SELECT *,
+--                ROW_NUMBER() OVER (
+--                    PARTITION BY supplier, date, giid, chrtid, barcode, nmid, warehouse, officeid, calctype
+--                    ORDER BY update_time DESC
+--                ) AS rn
+--         FROM reports.paid_storage
+--     ) t
+--     WHERE rn = 1
+-- ),
+-- dfr_agg AS (
+--     SELECT supplier, date_from::date, date_to::date, MIN(realizationreport_id) AS realizationreport_id
+--     FROM reports.detail_finance_reports
+--     WHERE report_type = 1
+--     GROUP BY supplier, date_from::date, date_to::date
+-- )
+-- SELECT
+--     ps.date,
+--     ps.nmid,
+--     ps.supplier,
+--     date_trunc('week', ps.date)::date AS date_from,
+--     (date_trunc('week', ps.date) + interval '6 days')::date AS date_to,
+--     SUM(ps.warehouseprice) AS storage_fee_total,
+--     dfr_agg.realizationreport_id
+-- FROM latest_ps ps
+-- JOIN dfr_agg
+--     ON ps.supplier = dfr_agg.supplier
+--     AND date_trunc('week', ps.date)::date = dfr_agg.date_from
+--     AND (date_trunc('week', ps.date) + interval '6 days')::date = dfr_agg.date_to
+-- WHERE ps.date::date >= '2025-08-25'
+-- GROUP BY ps.date, ps.nmid, ps.supplier, date_from, date_to, dfr_agg.realizationreport_id;
 
 
 -- CREATE OR REPLACE VIEW reports.v_storage_fee_by_nmid AS

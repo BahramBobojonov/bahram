@@ -25,8 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Период для получения данных (с 1 марта 2025 года до сегодня)
-date_from = datetime(2025, 3, 1).strftime('%Y-%m-%d')
+# Период для получения данных (ТЕСТ: март 2025)
+date_from = datetime(2025, 10, 1).strftime('%Y-%m-%d')
 date_to = datetime.now().strftime('%Y-%m-%d')
 
 credentials_file = r"cred.json"
@@ -227,7 +227,7 @@ def download_document(api_key, service_name, extension, save_dir='wb_documents')
             retry_after = response.headers.get('Retry-After', 12)
             return {'success': False, 'error': f'Rate limit, ждать {retry_after} сек'}
         else:
-            return {'success': False, 'error': f'{response.status_code if response else 'Нет ответа'} - {response.text if response else 'Нет ответа'}'}
+            return {'success': False, 'error': f"{response.status_code if response else 'Нет ответа'} - {response.text if response else 'Нет ответа'}"}
             
     except Exception as e:
         return {'success': False, 'error': str(e)}
@@ -698,7 +698,7 @@ def parse_report_pdf(pdf_path, report_number_override=None):
         print(f"    🔍 DEBUG: Детали ошибки: {traceback.format_exc()}")
         return []
 
-def process_upd_archive(zip_path, company_name):
+def process_upd_archive(zip_path, company_name, creation_time=None):
     """Обрабатывает один архив УПД"""
     archive_name = os.path.basename(zip_path)
     upd_number = extract_upd_number_from_archive_name(archive_name)
@@ -727,11 +727,14 @@ def process_upd_archive(zip_path, company_name):
             # Убеждаемся, что report_type установлен правильно
             if 'report_type' not in item or item['report_type'] is None:
                 item['report_type'] = 'upd'
+            # Добавляем creation_time из API
+            if creation_time:
+                item['creation_time'] = creation_time
         all_items.extend(items)
     
     return all_items
 
-def process_report_archive(zip_path, company_name):
+def process_report_archive(zip_path, company_name, creation_time=None):
     """Обрабатывает один архив еженедельного отчета реализации"""
     archive_name = os.path.basename(zip_path)
     
@@ -769,6 +772,9 @@ def process_report_archive(zip_path, company_name):
             # Убеждаемся, что report_type установлен правильно
             if 'report_type' not in item or item['report_type'] is None:
                 item['report_type'] = 'weekly_sales'
+            # Добавляем creation_time из API
+            if creation_time:
+                item['creation_time'] = creation_time
         all_items.extend(items)
         print(f"    🔍 DEBUG: Извлечено {len(items)} позиций из {os.path.basename(pdf_path)}")
     
@@ -954,7 +960,7 @@ def parse_redemption_notification_excel(excel_path, redemption_number_override=N
         print(f"    ✗ Ошибка парсинга Excel: {e}")
         return []
 
-def process_redemption_archive(zip_path, company_name):
+def process_redemption_archive(zip_path, company_name, creation_time=None):
     """Обрабатывает один архив уведомления о выкупе"""
     archive_name = os.path.basename(zip_path)
     redemption_number = extract_redemption_number_from_filename(archive_name)
@@ -988,6 +994,9 @@ def process_redemption_archive(zip_path, company_name):
             # Убеждаемся, что report_type установлен правильно
             if 'report_type' not in item or item['report_type'] is None:
                 item['report_type'] = 'redemption_notification'
+            # Добавляем creation_time из API
+            if creation_time:
+                item['creation_time'] = creation_time
         all_items.extend(items)
     
     return all_items
@@ -1015,6 +1024,7 @@ def create_upd_table_if_not_exists():
         vat_amount NUMERIC(15, 2),
         kiz TEXT,
         report_type VARCHAR(50) DEFAULT 'upd',
+        creation_time TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT unique_upd_item UNIQUE (company, upd_number, date, cost),
@@ -1028,6 +1038,7 @@ def create_upd_table_if_not_exists():
     CREATE INDEX IF NOT EXISTS idx_redemption_number ON {PG_SCHEMA}.{PG_TABLE}(redemption_number);
     CREATE INDEX IF NOT EXISTS idx_upd_date ON {PG_SCHEMA}.{PG_TABLE}(date);
     CREATE INDEX IF NOT EXISTS idx_report_type ON {PG_SCHEMA}.{PG_TABLE}(report_type);
+    CREATE INDEX IF NOT EXISTS idx_creation_time ON {PG_SCHEMA}.{PG_TABLE}(creation_time);
     """
     
     # Проверяем существование constraint'ов
@@ -1760,14 +1771,31 @@ def upload_upd_to_postgres(upd_data):
         print(f"  Детали: {traceback.format_exc()}")
         return False
 
-def deduplicate_upd_data():
-    """Выполняет дедупликацию данных в таблице с учетом разных типов записей"""
+def deduplicate_upd_data(company_name=None, date_start=None, date_end=None):
+    """Выполняет дедупликацию данных в таблице с учетом разных типов записей
+    
+    Args:
+        company_name: Имя компании для дедупликации. Если None, дедуплицируется вся таблица.
+        date_start: Начальная дата периода (формат YYYY-MM-DD)
+        date_end: Конечная дата периода (формат YYYY-MM-DD)
+    """
     try:
         # Имя временной таблицы БЕЗ схемы (временные таблицы создаются в pg_temp автоматически)
         temp_table = f"{PG_TABLE}_temp"
         
         # Удаляем временную таблицу если она уже существует
         drop_temp_table_query = f"DROP TABLE IF EXISTS {temp_table};"
+        
+        # Формируем фильтр по компании и периоду
+        filters = []
+        if company_name:
+            filters.append(f"company = '{company_name}'")
+        if date_start and date_end:
+            # Фильтруем по периоду - ищем документы, созданные в этот период
+            # Используем creation_time если есть, иначе пытаемся конвертировать поле date
+            filters.append(f"(creation_time BETWEEN '{date_start}'::timestamp AND '{date_end}'::timestamp + interval '1 day' - interval '1 second' OR TO_DATE(date, 'DD.MM.YYYY') BETWEEN '{date_start}'::date AND '{date_end}'::date)")
+        
+        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
         
         # Создаем временную таблицу с уникальными записями
         # Дедупликация по разным полям в зависимости от типа записи
@@ -1784,8 +1812,9 @@ def deduplicate_upd_data():
             item_name
         )
             company, upd_number, report_number, redemption_number, date, item_name, cost, amount, 
-            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, created_at, updated_at
+            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, creation_time, created_at, updated_at
         FROM {PG_SCHEMA}.{PG_TABLE}
+        {where_clause}
         ORDER BY company, 
                  COALESCE(upd_number, 'NULL'),
                  COALESCE(report_number, 'NULL'),
@@ -1797,18 +1826,22 @@ def deduplicate_upd_data():
                  updated_at DESC;
         """
         
-        # Удаляем все данные из основной таблицы
-        truncate_query = f"TRUNCATE TABLE {PG_SCHEMA}.{PG_TABLE};"
+        # Формируем DELETE запрос с теми же фильтрами
+        if where_clause:
+            delete_query = f"DELETE FROM {PG_SCHEMA}.{PG_TABLE} {where_clause};"
+        else:
+            # Удаляем все данные из основной таблицы
+            delete_query = f"TRUNCATE TABLE {PG_SCHEMA}.{PG_TABLE};"
         
         # Вставляем уникальные данные обратно
         insert_back_query = f"""
         INSERT INTO {PG_SCHEMA}.{PG_TABLE} (
             company, upd_number, report_number, redemption_number, date, item_name, cost, amount,
-            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, created_at, updated_at
+            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, creation_time, created_at, updated_at
         )
         SELECT 
             company, upd_number, report_number, redemption_number, date, item_name, cost, amount,
-            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, created_at, updated_at
+            article, barcode, quantity, report_type, vat_rate, vat_amount, kiz, creation_time, created_at, updated_at
         FROM {temp_table};
         """
         
@@ -1816,7 +1849,7 @@ def deduplicate_upd_data():
         drop_temp_after_query = f"DROP TABLE IF EXISTS {temp_table};"
         
         # Получаем количество записей до дедупликации
-        count_before_query = f"SELECT COUNT(*) FROM {PG_SCHEMA}.{PG_TABLE};"
+        count_before_query = f"SELECT COUNT(*) FROM {PG_SCHEMA}.{PG_TABLE} {where_clause};"
         
         with engine.begin() as conn:
             # Считаем записи до дедупликации
@@ -1826,7 +1859,7 @@ def deduplicate_upd_data():
             # Выполняем дедупликацию
             conn.execute(text(drop_temp_table_query))  # Удаляем старую временную таблицу
             conn.execute(text(create_temp_table_query))
-            conn.execute(text(truncate_query))
+            conn.execute(text(delete_query))
             conn.execute(text(insert_back_query))
             conn.execute(text(drop_temp_after_query))  # Очищаем временную таблицу
             
@@ -1836,15 +1869,26 @@ def deduplicate_upd_data():
         
         deleted_rows = count_before - count_after
         
+        # Формируем информационное сообщение
+        info_parts = []
+        if company_name:
+            info_parts.append(f"компании {company_name}")
+        if date_start and date_end:
+            info_parts.append(f"периода {date_start} - {date_end}")
+        
+        info_str = f" для {', '.join(info_parts)}" if info_parts else ""
+        
         if deleted_rows > 0:
-            print(f"  ✓ Удалено {deleted_rows} дубликатов из таблицы")
+            print(f"  ✓ Удалено {deleted_rows} дубликатов{info_str}")
         else:
-            print(f"  ✓ Дубликаты не найдены")
+            print(f"  ✓ Дубликаты не найдены{info_str}")
         
         return True
         
     except Exception as e:
         print(f"  ✗ Ошибка при дедупликации: {e}")
+        import traceback
+        print(f"  Детали: {traceback.format_exc()}")
         return False
 
 def cleanup_files(directory, archive_path=None):
@@ -1909,8 +1953,8 @@ print("Загрузка API ключей из Google Sheets...")
 df = get_sheet_data_as_dataframe(credentials_file, spreadsheet_key, sheet_name)
 df = df[(df['API ключ'] != '') & (df['API ключ'] != None) & ~((df['Имя Юрлица'] == 'TD') | (df['Имя Юрлица'] == 'ИП Крапивина С.А.'))]
 
-# Для теста можно раскомментировать (тестируем на одной компании):
-# df = df[df['Имя Юрлица']=='ИП Солоджук Е. Г']
+# ТЕСТ: фильтруем только одну компанию
+#df = df[df['Имя Юрлица'] == 'ИП Мелешков А.Г.']
 
 dict_api = dict(zip(df['API ключ'], df['Имя Юрлица']))
 print(f"Найдено {len(dict_api)} компаний для обработки\n")
@@ -1966,6 +2010,7 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
         service_name = doc.get('serviceName')
         extensions = doc.get('extensions', [])
         category = doc.get('category', '')
+        creation_time = doc.get('creationTime')  # Получаем время создания из API
         
         if not service_name or not extensions:
             continue
@@ -1986,7 +2031,7 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
             # Если это УПД, сразу парсим
             if is_upd and extension == 'zip':
                 try:
-                    upd_items = process_upd_archive(result['file_path'], company_name)
+                    upd_items = process_upd_archive(result['file_path'], company_name, creation_time)
                     if upd_items:
                         company_upd_data.extend(upd_items)
                         print(f" → Извлечено {len(upd_items)} позиций УПД")
@@ -1997,7 +2042,7 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
             # Если это еженедельный отчет, парсим
             elif is_report and extension == 'zip':
                 try:
-                    report_items = process_report_archive(result['file_path'], company_name)
+                    report_items = process_report_archive(result['file_path'], company_name, creation_time)
                     if report_items:
                         company_upd_data.extend(report_items)
                         print(f" → Извлечено {len(report_items)} позиций отчета")
@@ -2008,7 +2053,7 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
             # Если это уведомление о выкупе, парсим
             elif is_redemption and extension == 'zip':
                 try:
-                    redemption_items = process_redemption_archive(result['file_path'], company_name)
+                    redemption_items = process_redemption_archive(result['file_path'], company_name, creation_time)
                     if redemption_items:
                         company_upd_data.extend(redemption_items)
                         print(f" → Извлечено {len(redemption_items)} позиций уведомления")
@@ -2058,9 +2103,9 @@ for company_idx, (api_key, company_name) in enumerate(dict_api.items(), 1):
         if upload_success:
             total_stats['total_upd_items'] += len(company_upd_data)
             
-            # Выполняем дедупликацию после загрузки
-            print(f"\n🔄 Дедупликация данных...")
-            deduplicate_upd_data()
+            # Выполняем дедупликацию после загрузки только для текущей компании и периода
+            print(f"\n🔄 Дедупликация данных для {company_name} за период {date_from} - {date_to}...")
+            deduplicate_upd_data(company_name, date_from, date_to)
             
             # Обновляем агрегированные данные для этой компании
             print(f"\n📊 Обновление агрегированных данных...")
@@ -2157,7 +2202,7 @@ def generate_documents_report_from_march_2025():
         return "Отчет не может быть сгенерирован - 1 марта 2025 года еще не наступило"
     
     start_date = march_1_2025.strftime('%Y-%m-%d')
-    end_date = today.strftime('%Y-%m-%d')
+    end_date = datetime(2025, 6, 30).strftime('%Y-%m-%d')
     
     print("=" * 80)
     print(f"Генерация отчета документов с 1 марта 2025 года")
