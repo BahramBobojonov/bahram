@@ -1,6 +1,7 @@
 -- reports.srid_nm_id_map исходный текст
 
-CREATE OR REPLACE VIEW reports.srid_nm_id_map
+CREATE MATERIALIZED VIEW reports.srid_nm_id_map
+TABLESPACE pg_default
 AS SELECT DISTINCT t.srid,
     t.nm_id,
     t.source
@@ -28,4 +29,5 @@ AS SELECT DISTINCT t.srid,
          SELECT goods_return.srid,
             goods_return.nmid AS nm_id,
             'goods_return'::text AS source
-           FROM reports.goods_return) t;
+           FROM reports.goods_return) t
+WITH DATA;

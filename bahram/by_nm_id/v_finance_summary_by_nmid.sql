@@ -118,7 +118,7 @@ END AS margin_after_commission,
     SUM(
         CASE 
             WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
-            WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+            WHEN supplier_oper_name = 'Логистика сторно' THEN delivery_rub::numeric
             WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
             ELSE 0
         END
@@ -254,7 +254,7 @@ SUM(
 SUM(
     CASE 
         WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
-        WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+        WHEN supplier_oper_name = 'Логистика сторно' THEN delivery_rub::numeric
         WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
         ELSE 0
     END
@@ -322,7 +322,7 @@ CASE
             SUM(
                 CASE 
                     WHEN supplier_oper_name = 'Логистика' THEN delivery_rub::numeric
-                    WHEN supplier_oper_name = 'Логистика сторно' THEN -delivery_rub::numeric
+                    WHEN supplier_oper_name = 'Логистика сторно' THEN delivery_rub::numeric
                     WHEN supplier_oper_name = 'Коррекция логистики' THEN delivery_rub::numeric
                     ELSE 0
                 END

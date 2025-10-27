@@ -36,7 +36,9 @@ SELECT
   COALESCE(a.komossia, 0) AS komossia,
   COALESCE(a.margin_after_commission, 0) AS margin_after_commission,
   COALESCE(a.to_transfer_for_goods, 0) AS to_transfer_for_goods,
-  COALESCE(a.logistics_total, 0) AS logistics_total,
+  COALESCE(a.logistics_total, 0) AS logistics_total_without_storno,
+  COALESCE(storno_logistics.delivery_rub, 0) AS storno_logistics_total,
+  COALESCE(a.logistics_total,0) + COALESCE(storno_logistics.delivery_rub, 0) AS logistics_total,
   COALESCE(a.logistics_count, 0) AS logistics_count,
   COALESCE(a.logistics_storno_count, 0) AS logistics_storno_count,
   COALESCE(a.correction_count, 0) AS correction_count,
@@ -55,11 +57,12 @@ SELECT
   COALESCE(fee.acquiring_fee, 0) AS acquiring_fee,
   COALESCE(logistic.rebill_logistic_cost, 0) AS rebill_logistic_cost,
   COALESCE(cashback.cashback_discount, 0) AS cashback_discount,
+  COALESCE(additional_payment_correction.additional_payment_correction, 0) AS additional_payment_correction,
   (
   COALESCE(a.to_transfer_for_goods::numeric, 0)
 )
 -
-  COALESCE(a.logistics_total::numeric, 0)
+  (COALESCE(a.logistics_total::numeric, 0) + COALESCE(storno_logistics.delivery_rub::numeric, 0))
 -
   COALESCE(a.penalties_total::numeric, 0)
 -
@@ -77,6 +80,8 @@ COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
 COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
 -
 COALESCE(a.deduction_other_total::numeric, 0) -- deduction_other_total
+-
+COALESCE(additional_payment_correction.additional_payment_correction::numeric, 0) -- additional_payment_correction
 AS total_to_transfer,
   COALESCE(a.net_retail_amount, 0) AS net_retail_amount
   ,(
@@ -92,7 +97,7 @@ AS total_to_transfer,
   COALESCE(a.to_transfer_for_goods::numeric, 0)
 )
 -
-  COALESCE(a.logistics_total::numeric, 0)
+  (COALESCE(a.logistics_total::numeric, 0) + COALESCE(storno_logistics.delivery_rub::numeric, 0))
 -
   COALESCE(a.penalties_total::numeric, 0)
 -
@@ -110,6 +115,8 @@ COALESCE(d.sum_deduction::numeric, 0)   -- deduction_adv_total
 COALESCE(f.total_deduction::numeric, 0) -- deduction_writeoff_total
 -
 COALESCE(a.deduction_other_total::numeric, 0)
+-
+COALESCE(additional_payment_correction.additional_payment_correction::numeric, 0) -- additional_payment_correction
 )
 --
 - (  COALESCE(a.net_retail_amount, 0) * CAST(:vat_rate AS numeric) / (1 + CAST(:vat_rate AS numeric)))  -- vat_amount
@@ -177,6 +184,31 @@ FULL JOIN reports.v_bonus_review_deductions f
  AND COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) = cashback.rr_dt::date
  AND COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) = cashback.date_from::date
  AND COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) = cashback.date_to::date
+  LEFT JOIN (
+  SELECT 
+    supplier,
+    realizationreport_id,
+    nm_id,
+    rr_dt::date AS rr_dt,
+    date_from::date AS date_from,
+    date_to::date AS date_to,
+    SUM(delivery_rub) AS delivery_rub
+  FROM reports.vw_storno_logistics_nm_id
+  GROUP BY supplier, realizationreport_id, nm_id, rr_dt::date, date_from::date, date_to::date
+) storno_logistics
+  ON COALESCE(a.supplier_name, b.supplier, c.supplier, d.supplier, f.supplier) = storno_logistics.supplier
+ AND COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id, d.realizationreport_id, f.realizationreport_id) = storno_logistics.realizationreport_id
+ AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint) = storno_logistics.nm_id
+ AND COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) = storno_logistics.rr_dt
+ AND COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) = storno_logistics.date_from
+ AND COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) = storno_logistics.date_to
+LEFT JOIN reports.additional_payment_correction additional_payment_correction
+  ON COALESCE(a.supplier_name, b.supplier, c.supplier, d.supplier, f.supplier) = additional_payment_correction.supplier
+ AND COALESCE(a.realizationreport_id, b.realizationreport_id, c.realizationreport_id, d.realizationreport_id, f.realizationreport_id) = additional_payment_correction.realizationreport_id
+ AND COALESCE(a.nm_id, b.nmid::bigint, c.nm_id, d.nm_id, f.product_id::bigint) = additional_payment_correction.nm_id
+ AND COALESCE(a.rr_dt, b.date, c.rr_dt, d.sale_dt, f.rr_dt) = additional_payment_correction.rr_dt
+ AND COALESCE(a.date_from, b.date_from, c.date_from, d.date_from, f.date_from) = additional_payment_correction.date_from
+ AND COALESCE(a.date_to, b.date_to, c.date_to, d.date_to, f.date_to) = additional_payment_correction.date_to
  LEFT JOIN products.v_single_cost_price cp
   ON a.supplier_name = cp.legal_entity
  AND a.nm_id = cp.nm_id
