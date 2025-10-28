@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Период для получения данных (ТЕСТ: март 2025)
-date_from = datetime(2025, 10, 1).strftime('%Y-%m-%d')
+date_from = datetime(2025, 10, 15).strftime('%Y-%m-%d')
 date_to = datetime.now().strftime('%Y-%m-%d')
 
 credentials_file = r"cred.json"
