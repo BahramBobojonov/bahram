@@ -43,6 +43,5 @@ LEFT JOIN (
     WHERE rn = 1
 ) s3
 ON dfr.assembly_id = s3.assembly_id
-WHERE dfr.supplier_oper_name = 'Возмещение за выдачу и возврат товаров на ПВЗ'
-  AND dfr.date_from::date >= '2025-03-01'
+WHERE dfr.date_from::date >= '2025-03-01'
 GROUP BY 1,2,3,4,5,6;

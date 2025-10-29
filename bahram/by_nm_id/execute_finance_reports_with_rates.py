@@ -85,8 +85,8 @@ def load_rates_dataframe():
     # Убираем строки без имени юрлица
     df = df[df['Имя Юрлица'].astype(str).str.strip() != '']
     
-    # Фильтруем только для ИП Астахова А.А.
-    #df = df[(df['Имя Юрлица'] == 'ИП Баах И.Л.')|(df['Имя Юрлица'] == 'ИП Солоджук Е. Г')]
+    # Фильтруем только для ИП Астахова А.А. |(df['Имя Юрлица'] == 'ИП Солоджук Е. Г')
+    df = df[(df['Имя Юрлица'] == 'ИП Баах Р.Н.')]
     
     logger.info(f"✅ Загружено {len(df)} записей с налоговыми ставками из Google Sheet")
     return df
@@ -121,7 +121,7 @@ def execute_sql_with_params(sql_query, vat_rate, tax_rate, supplier_name):
         with ENGINE.connect() as conn:
             result = conn.execute(
                 text(sql_query),
-                {"vat_rate": vat_rate, "tax_rate": tax_rate}
+                {"vat_rate": vat_rate, "tax_rate": tax_rate, "supplier_name": supplier_name}
             )
             df = pd.DataFrame(result.fetchall(), columns=result.keys())
         
@@ -314,11 +314,13 @@ def main():
         
         logger.info(f"\n🔄 Обработка: {supplier_name} (НДС={vat_rate*100:.1f}%, Налог={tax_rate*100:.1f}%)")
         
-        # Добавляем фильтр по supplier к запросу
-        sql_filtered = sql_query_2 + f"\nWHERE COALESCE(a.supplier_name, b.supplier, c.supplier, d.supplier, f.supplier) = '{supplier_name}'"
-        
+        # Используем SQL запрос с параметром supplier_name
         try:
-            df_result = execute_sql_with_params(sql_filtered, vat_rate, tax_rate, supplier_name)
+            df_result = execute_sql_with_params(sql_query_2, vat_rate, tax_rate, supplier_name)
+            
+            # Фильтруем по supplier_name
+            if 'supplier_name' in df_result.columns:
+                df_result = df_result[df_result['supplier_name'] == supplier_name]
             
             if len(df_result) > 0:
                 # Конвертируем все числовые колонки в правильные типы
